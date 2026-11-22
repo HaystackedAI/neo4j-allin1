@@ -2,8 +2,9 @@
 import logging
 import sys
 import sqlite3
-from typing import Optional, Dict, List, Any
+import logging
 from datetime import datetime
+from typing import Any, Optional
 
 from config.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 from config.neo4j_connector import Neo4jConnector
@@ -12,7 +13,6 @@ from ontology.ontology_models import (
     RelationType, PropertyDefinition, MethodDefinition
 )
 from ds.software_engineering_data import SoftwareEngineeringDemo
-from ontology.ontology_models import DataSourceType
 from ds.data_source_mapper import DataSourceMapper
 from ontology.ontology_builder import DirectNeo4jOntologyBuilder
 
@@ -27,7 +27,7 @@ class SoftwareEngineeringEntityBuilder:
     """软件工程实体构建器 - 集成到主构建程序中"""
     
     @staticmethod 
-    def create_developer_class(data_source: Optional[Any] = None) -> OntologyClass:
+    def create_developer_class(data_source: Any | None = None) -> OntologyClass:
         """创建开发者实体类"""
         properties = [
             PropertyDefinition(

@@ -577,11 +577,7 @@ class OntologyKnowledgeGraphBuilder:
             self.mapper = DataSourceMapper()
             
             # 初始化实体实例管理器
-            self.entity_manager = EntityInstanceManager("software_engineering.db")
-            
-            if not self.entity_manager.connect():
-                logger.error("无法连接到SQLite数据库（实体管理器）")
-                return False
+            self.entity_manager = None  # The active ontology path reads PostgreSQL via SoftwareEngineeringDemo.
             
             logger.info("基于数据库的知识图谱构建器初始化成功")
             return True
@@ -819,7 +815,7 @@ class OntologyKnowledgeGraphBuilder:
             logger.info("开始构建基于直接Neo4j的知识图谱...")
             
             # 1. 先构建基础知识图谱
-            self.direct_builder.build_ontology_from_sqlite("software_engineering.db")
+            self.direct_builder.build_ontology_from_postgres(self.demo.db_url)
             
             # 2. 添加实体类节点和INSTANCE_OF关系
             self._create_entity_class_nodes()

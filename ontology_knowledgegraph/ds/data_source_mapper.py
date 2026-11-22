@@ -129,7 +129,7 @@ class DataSourceMapper:
             logger.error(f"添加数据源失败: {e}")
             return False
     
-    def create_ontology_class_from_table(self, table_name: str, data_source: SQLiteDataSource) -> OntologyClass:
+    def create_ontology_class_from_table(self, table_name: str, data_source: DataSource) -> OntologyClass:
         """从数据库表创建本体类"""
         schema = data_source.get_schema()
         
@@ -192,6 +192,24 @@ class DataSourceMapper:
                 # 分析基于记录数据的具体关系
                 concrete_relations = RelationAnalyzer.analyze_concrete_relations(record, instance.name, ontology_class.name)
                 instance.relations.extend(concrete_relations)
+            elif ontology_class.data_source and hasattr(ontology_class.data_source, "get_schema"):
+                schema = ontology_class.data_source.get_schema()
+                for foreign_key in schema.get("foreign_keys", []):
+                    columns = foreign_key.get("constrained_columns") or []
+                    targets = foreign_key.get("referred_columns") or []
+                    if columns and targets and record.get(columns[0]) is not None:
+                        instance.relations.append({
+                            "type": "foreign_key",
+                            "relation_name": f"references_{foreign_key['referred_table']}",
+                            "object": str(record[columns[0]]),
+                            "confidence": 1.0,
+                        })
+                instance.relations.extend(
+                    RelationAnalyzer.analyze_semantic_relations(record, instance.name)
+                )
+                instance.relations.extend(
+                    RelationAnalyzer.analyze_concrete_relations(record, instance.name, ontology_class.name)
+                )
             
             instances.append(instance)
         
@@ -231,13 +249,15 @@ class DataSourceMapper:
             logger.error(f"同步实例失败: {e}")
             return False
     
-    def build_ontology_from_database(self, db_path: str, table_names: List[str]) -> Dict[str, Any]:
+    def build_ontology_from_database(self, db_path: Any, table_names: List[str], data_source_class=None) -> Dict[str, Any]:
         """从数据库构建完整本体"""
         try:
-            # 创建SQLite数据源
-            sqlite_source = SQLiteDataSource(
+            source_class = data_source_class or SQLiteDataSource
+            connection_string = db_path.render_as_string(hide_password=False) if hasattr(db_path, "render_as_string") else str(db_path)
+            # Validate the shared database connection before reading individual tables.
+            sqlite_source = source_class(
                 name="main_database",
-                connection_string=db_path,
+                connection_string=connection_string,
                 table_name="main"
             )
             
@@ -249,14 +269,15 @@ class DataSourceMapper:
             
             for table_name in table_names:
                 # 为每个表创建数据源
-                table_source = SQLiteDataSource(
+                table_source = source_class(
                     name=f"{table_name}_source",
-                    connection_string=db_path,
+                    connection_string=connection_string,
                     table_name=table_name
                 )
                 
-                if not self.add_data_source(table_source):
-                    continue
+                # The validation source already checked connectivity. Avoid opening
+                # an extra PostgreSQL connection for every table.
+                self.data_sources[table_source.id] = table_source
                 
                 # 创建本体类
                 ontology_class = self.create_ontology_class_from_table(table_name, table_source)

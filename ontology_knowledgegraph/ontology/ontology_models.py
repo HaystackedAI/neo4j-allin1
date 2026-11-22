@@ -35,6 +35,7 @@ class ConceptType(str, Enum):
 class DataSourceType(str, Enum):
     """数据源类型枚举"""
     SQLITE_TABLE = "sqlite_table"
+    POSTGRESQL_TABLE = "postgresql_table"
     API_ENDPOINT = "api_endpoint"
     MESSAGE_QUEUE = "message_queue"
     FILE = "file"

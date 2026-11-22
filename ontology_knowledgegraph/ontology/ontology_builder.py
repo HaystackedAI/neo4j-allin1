@@ -3,6 +3,7 @@ import sqlite3
 import logging
 from typing import Dict, List, Any
 from neo4j import GraphDatabase
+from sqlalchemy import create_engine, text
 from config.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 
 class DirectNeo4jOntologyBuilder:
@@ -92,6 +93,35 @@ class DirectNeo4jOntologyBuilder:
         except Exception as e:
             self.logger.error(f"构建本体知识图谱失败: {e}")
             raise
+
+    def build_ontology_from_postgres(self, database_url):
+        """Build graph nodes and relationships from the PostgreSQL demo tables."""
+        self.clear_database()
+        self.create_ontology_schema()
+        engine = create_engine(database_url)
+        try:
+            with engine.connect() as conn:
+                rows = {
+                    table: [dict(row) for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings()]
+                    for table in ("projects", "teams", "developers", "requirements", "tasks")
+                }
+            # Preserve the existing node creation mapping while converting SQLAlchemy
+            # mapping rows to the tuple order expected by the SQLite helpers.
+            with self.driver.session() as session:
+                for row in rows["projects"]:
+                    session.run("CREATE (p:Project $props)", props=row)
+                for row in rows["teams"]:
+                    session.run("CREATE (n:Team $props)", props=row)
+                for row in rows["developers"]:
+                    session.run("CREATE (n:Developer $props)", props=row)
+                for row in rows["requirements"]:
+                    session.run("CREATE (n:Requirement $props)", props=row)
+                for row in rows["tasks"]:
+                    session.run("CREATE (n:Task $props)", props=row)
+            self._create_relationships(None)
+            self.logger.info("PostgreSQL ontology graph built")
+        finally:
+            engine.dispose()
     
     def _create_project_nodes(self, cursor):
         """创建项目节点"""

@@ -1,6 +1,7 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import './App.css'
 
+
 type SavedQuery = {
     id: number
     name: string

@@ -127,7 +127,7 @@ function App() {
                                     <button
                                         className="saved-query-name"
                                         key={saved.id}
-                                        onClick={() => setQuery(String(saved.cypher))}
+                                        onClick={() => setQuery(String(saved.name))}
                                         title={saved.cypher}
                                     >
                                         {saved.name}

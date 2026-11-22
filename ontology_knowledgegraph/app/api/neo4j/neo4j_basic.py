@@ -40,7 +40,15 @@ def list_saved_queries():
         rows = connection.execute(text(
             "SELECT id, name, cypher, created_at FROM saved_cypher_queries ORDER BY created_at DESC, id DESC"
         )).mappings().all()
-        return [dict(row) for row in rows]
+        return [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "cypher": str(row["cypher"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
 
 @neo4jRou.post("/saved-queries")

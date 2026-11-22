@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import './App.css'
 
 
@@ -12,6 +12,7 @@ type SavedQuery = {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 function App() {
+    const queryEditor = useRef<HTMLTextAreaElement>(null)
     const [query, setQuery] = useState('')
     const [queryName, setQueryName] = useState('')
     const [result, setResult] = useState<unknown>(null)
@@ -41,8 +42,14 @@ function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ cypher, parameters: {} }),
             })
-            const body = await response.json()
-            if (!response.ok) throw new Error(JSON.stringify(body))
+            const responseText = await response.text()
+            let body: unknown
+            try {
+                body = responseText ? JSON.parse(responseText) : null
+            } catch {
+                body = responseText
+            }
+            if (!response.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body))
             setResult(body)
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
@@ -68,17 +75,6 @@ function App() {
         }
     }
 
-    async function deleteQuery(id: number) {
-        setError('')
-        try {
-            const response = await fetch(`${API_BASE}/neo4j/saved-queries/${id}`, { method: 'DELETE' })
-            if (!response.ok) throw new Error(await response.text())
-            await loadSavedQueries()
-        } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-        }
-    }
-
     function handleQueryKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
         if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
@@ -91,6 +87,7 @@ function App() {
             <header className="topbar">
                 <strong className="brand">Knowledge Graph</strong>
                 <textarea
+                    ref={queryEditor}
                     className="search"
                     placeholder="Enter Cypher query..."
                     rows={4}
@@ -121,28 +118,21 @@ function App() {
                             <pre className="result-output">{result === null ? 'Run a Cypher query to see its returned records.' : JSON.stringify(result, null, 2)}</pre>
                         </section>
                         <section className="pane saved-pane">
-                            <h2>Saved Cypher queries</h2>
                             <div className="save-query-form">
                                 <input aria-label="Saved query name" placeholder="Query name" value={queryName} onChange={(event) => setQueryName(event.target.value)} />
-                                <button onClick={() => void saveQuery()} disabled={!query.trim() || !queryName.trim()}>Save current query</button>
+                                <button onClick={() => void saveQuery()} disabled={!query.trim() || !queryName.trim()}>Save</button>
                             </div>
-                            <div className="table-scroll">
-                                <table>
-                                    <thead><tr><th>Name</th><th>Cypher</th><th>Actions</th></tr></thead>
-                                    <tbody>
-                                        {savedQueries.map((saved) => (
-                                            <tr key={saved.id}>
-                                                <td>{saved.name}</td>
-                                                <td><code>{saved.cypher}</code></td>
-                                                <td className="row-actions">
-                                                    <button onClick={() => { setQuery(saved.cypher); void runQuery(saved.cypher) }}>Run</button>
-                                                    <button className="delete-query" onClick={() => void deleteQuery(saved.id)}>Delete</button>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                        {savedQueries.length === 0 && <tr><td colSpan={3}>No saved queries.</td></tr>}
-                                    </tbody>
-                                </table>
+                            <div className="saved-query-list">
+                                {savedQueries.map((saved) => (
+                                    <button
+                                        className="saved-query-name"
+                                        key={saved.id}
+                                        onClick={() => setQuery(String(saved.cypher))}
+                                        title={saved.cypher}
+                                    >
+                                        {saved.name}
+                                    </button>
+                                ))}
                             </div>
                         </section>
                     </div>

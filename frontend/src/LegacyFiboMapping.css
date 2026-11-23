@@ -14,6 +14,8 @@
 .legacy-source span { color: #64748b; font-size: 10px; }
 .legacy-semantic-example { display: grid; gap: 4px; margin-top: 14px; padding: 10px 12px; border-left: 3px solid #64748b; background: #f8fafc; color: #334155; font-size: 11px; }
 .legacy-semantic-example span { color: #475569; }
+.legacy-semantic-example button { justify-self: start; padding: 5px 8px; border: 1px solid #cbd5e1; border-radius: 5px; background: white; color: #334155; font: 11px var(--sans); cursor: pointer; }
+.legacy-mapping-note { display: grid; gap: 4px; margin: 12px 0; padding: 10px 12px; border-left: 3px solid #d97706; background: #fffbeb; color: #78350f; font-size: 11px; }
 .legacy-source .mapping-status { color: #92400e; text-transform: capitalize; }
 .legacy-source .mapping-status.reviewed { color: #166534; }
 .legacy-fibo-editor { min-width: 0; padding: 18px; overflow: auto; }
@@ -24,7 +26,7 @@
 .legacy-source-summary small { display: block; margin-top: 5px; color: #64748b; font-size: 10px; }
 .fibo-target-fields { display: grid; gap: 11px; padding: 14px 0; }
 .fibo-target-fields label, .cde-fields > label:not(.cde-toggle) { display: grid; gap: 5px; color: #334155; font-size: 11px; font-weight: 600; }
-.fibo-target-fields input, .fibo-target-fields textarea, .cde-fields textarea { width: 100%; box-sizing: border-box; padding: 8px 9px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #0f172a; font: 12px/1.4 var(--sans); }
+.fibo-target-fields input, .fibo-target-fields select, .fibo-target-fields textarea, .cde-fields textarea { width: 100%; box-sizing: border-box; padding: 8px 9px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; color: #0f172a; font: 12px/1.4 var(--sans); }
 .fibo-target-fields textarea, .cde-fields textarea { resize: vertical; }
 .cde-fields { display: grid; gap: 10px; margin: 0 0 14px; padding: 12px; border: 1px solid #cbd5e1; border-radius: 7px; }
 .cde-fields legend { padding: 0 5px; color: #334155; font-size: 11px; font-weight: 700; }

@@ -7,6 +7,12 @@ type SourceCatalog = {
     elements: LegacySource[]
 }
 
+type TargetCatalog = {
+    classes: { name: string; description: string }[]
+    properties: { name: string; domain: string; description: string }[]
+    relationships: { name: string; description: string }[]
+}
+
 type LegacySource = {
     sourceRef: string
     sourceKind: 'entity' | 'field' | 'relationship'
@@ -14,7 +20,7 @@ type LegacySource = {
     sourceField: string | null
     graphElement: string
     description: string
-    fiboTargetKind: 'class' | 'property'
+    fiboTargetKind: 'class' | 'property' | 'relationship'
     semanticExample?: string | null
 }
 
@@ -25,8 +31,8 @@ type FiboMapping = {
     source_table: string
     source_field: string | null
     graph_element: string
-    fibo_target_kind: 'class' | 'property'
-    fibo_iri: string
+    fibo_target_kind: 'class' | 'property' | 'relationship'
+    fibo_iri: string | null
     fibo_label: string
     rationale: string
     is_cde: boolean
@@ -36,12 +42,77 @@ type FiboMapping = {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
+const mappingSuggestions: Record<string, { label: string; domain?: string; rationale: string }> = {
+    'entity|LN_ACCT': {
+        label: 'Loan',
+        rationale: 'Candidate: LN_ACCT is documented as an individual loan account or drawdown, corresponding to the Loan node in the current graph.',
+    },
+    'entity|LN_PAY_TXN': {
+        label: 'Payment',
+        rationale: 'Candidate: each LN_PAY_TXN row represents a payment transaction; confirm this matches the graph Payment node granularity.',
+    },
+    'field|LN_ACCT|LN_NO': {
+        label: 'loanId',
+        domain: 'Loan',
+        rationale: 'Candidate: both identify an individual loan account.',
+    },
+    'field|LN_ACCT|ORIG_AMT': {
+        label: 'principalAmount',
+        domain: 'Loan',
+        rationale: 'Candidate: ORIG_AMT is the original loan amount; confirm its definition matches the graph principal amount.',
+    },
+    'field|LN_ACCT|OUT_BAL': {
+        label: 'currentBalance',
+        domain: 'Loan',
+        rationale: 'Candidate: OUT_BAL is the outstanding loan balance.',
+    },
+    'field|LN_ACCT|INT_RATE': {
+        label: 'interestRate',
+        domain: 'Loan',
+        rationale: 'Candidate: both describe the loan interest rate; confirm percentage units and scale.',
+    },
+    'field|LN_ACCT|BOOK_DT': {
+        label: 'originationDate',
+        domain: 'Loan',
+        rationale: 'Candidate: BOOK_DT may represent loan origination; confirm the source business definition.',
+    },
+    'field|LN_ACCT|MAT_DT': {
+        label: 'maturityDate',
+        domain: 'Loan',
+        rationale: 'Candidate: both represent the loan maturity date.',
+    },
+    'field|LN_ACCT|LN_STAT': {
+        label: 'status',
+        domain: 'Loan',
+        rationale: 'Candidate: both represent loan status; legacy code values may need normalization.',
+    },
+    'field|LN_PAY_TXN|TXN_NO': {
+        label: 'paymentId',
+        domain: 'Payment',
+        rationale: 'Candidate: TXN_NO identifies a payment transaction; confirm each transaction is modeled as a Payment.',
+    },
+    'relationship|LN_ACCT|CUST_NO|CUST_MST|CUST_NO': {
+        label: 'BORROWER_ON',
+        rationale: 'Candidate: this foreign key links a loan account to its borrower/customer. Confirm direction and customer identity alignment with the graph relationship.',
+    },
+    'relationship|LN_PAY_TXN|LN_NO|LN_ACCT|LN_NO': {
+        label: 'HAS_PAYMENT',
+        rationale: 'Candidate: this foreign key links a loan account to its payment transactions.',
+    },
+}
+
+const sourceMappingNotes: Record<string, string> = {
+    'entity|CUST_MST': 'CUST_MST is a customer / borrower legal-entity master, while the current graph has Person but no LegalEntity label. No direct target is suggested to avoid treating an organization as a person.',
+    'field|CUST_MST|CUST_NO': 'CUST_NO identifies a legal-entity customer. The current graph has Person.personId but no LegalEntity identifier property, so no direct target is suggested.',
+    'field|CUST_MST|LEGAL_NM': 'LEGAL_NM is a legal-entity name. The current graph has Person.name, which represents a person name; no direct target is suggested.',
+}
+
 export default function LegacyFiboMapping() {
     const [sources, setSources] = useState<LegacySource[]>([])
     const [mappings, setMappings] = useState<FiboMapping[]>([])
+    const [targets, setTargets] = useState<TargetCatalog>({ classes: [], properties: [], relationships: [] })
     const [selectedRef, setSelectedRef] = useState('')
     const [filter, setFilter] = useState('')
-    const [fiboIri, setFiboIri] = useState('')
     const [fiboLabel, setFiboLabel] = useState('')
     const [rationale, setRationale] = useState('')
     const [isCde, setIsCde] = useState(false)
@@ -65,9 +136,14 @@ export default function LegacyFiboMapping() {
                 if (!response.ok) throw new Error(await response.text())
                 return await response.json() as FiboMapping[]
             }),
-        ]).then(([catalog, existingMappings]) => {
+            fetch(`${API_BASE}/legacy-fibo-mapping/targets`).then(async (response) => {
+                if (!response.ok) throw new Error(await response.text())
+                return await response.json() as TargetCatalog
+            }),
+        ]).then(([catalog, existingMappings, graphTargets]) => {
             setSources(catalog.elements)
             setMappings(existingMappings)
+            setTargets(graphTargets)
         }).catch((cause: unknown) => {
             setError(cause instanceof Error ? cause.message : String(cause))
         })
@@ -79,6 +155,21 @@ export default function LegacyFiboMapping() {
 
     const selectedSource = sources.find((source) => source.sourceRef === selectedRef)
     const selectedMapping = mappings.find((mapping) => mapping.source_ref === selectedRef)
+    const suggestion = selectedSource ? mappingSuggestions[selectedSource.sourceRef] : undefined
+    const targetOptions = selectedSource?.fiboTargetKind === 'class'
+        ? targets.classes.map((item) => ({ name: item.name, domain: '', description: item.description }))
+        : selectedSource?.fiboTargetKind === 'relationship'
+            ? targets.relationships.map((item) => ({ name: item.name, domain: '', description: item.description }))
+            : targets.properties.map((item) => ({ name: item.name, domain: item.domain, description: item.description }))
+    const selectedTargetExists = targetOptions.some((item) => item.name === fiboLabel)
+    const suggestedTargetName = suggestion
+        ? (suggestion.domain ? `${suggestion.domain}.${suggestion.label}` : suggestion.label)
+        : ''
+    const mappingNote = selectedSource
+        ? sourceMappingNotes[selectedSource.sourceRef] ?? (selectedSource.sourceTable === 'CUST_MST'
+            ? 'The current graph has no LegalEntity target, and this source table describes legal-entity customers. There may be no direct graph mapping for this element.'
+            : undefined)
+        : undefined
     const filteredSources = useMemo(() => {
         const needle = filter.trim().toLowerCase()
         if (!needle) return sources
@@ -90,7 +181,6 @@ export default function LegacyFiboMapping() {
     }, [filter, sources])
 
     useEffect(() => {
-        setFiboIri(selectedMapping?.fibo_iri ?? '')
         setFiboLabel(selectedMapping?.fibo_label ?? '')
         setRationale(selectedMapping?.rationale ?? '')
         setIsCde(selectedMapping?.is_cde ?? false)
@@ -109,7 +199,7 @@ export default function LegacyFiboMapping() {
             source_field: selectedSource.sourceField,
             graph_element: selectedSource.graphElement,
             fibo_target_kind: selectedSource.fiboTargetKind,
-            fibo_iri: fiboIri.trim(),
+            fibo_iri: selectedMapping?.fibo_iri ?? null,
             fibo_label: fiboLabel.trim(),
             rationale: rationale.trim(),
             is_cde: selectedSource.sourceKind === 'field' && isCde,
@@ -157,13 +247,13 @@ export default function LegacyFiboMapping() {
             <div className="legacy-fibo-heading">
                 <div>
                     <h1>Legacy → FIBO Mapping</h1>
-                    <p>Map loan source entities and fields to explicit FIBO classes and properties.</p>
+                <p>Map legacy entities, fields, and relationships to the current loan graph vocabulary.</p>
                 </div>
                 <span>{mappings.length} saved mappings</span>
             </div>
 
             <div className="legacy-fibo-note">
-                Sources come from the synthetic legacy SQL schema. It includes tables, fields, and foreign-key relationships; the demo SQL and its sample records are not loaded automatically.
+                The current loan graph supplies the exact available labels, properties, and relationship types. FIBO IRIs are omitted for now. Suggestions are candidates to review, not confirmed mappings.
             </div>
             {error && <pre className="legacy-fibo-error">{error}</pre>}
 
@@ -206,18 +296,29 @@ export default function LegacyFiboMapping() {
 
                             <div className="fibo-target-fields">
                                 <label>
-                                    FIBO {selectedSource.fiboTargetKind} label
-                                    <input value={fiboLabel} onChange={(event) => setFiboLabel(event.target.value)} placeholder="e.g. Mortgage Loan" />
-                                </label>
-                                <label>
-                                    FIBO {selectedSource.fiboTargetKind} IRI
-                                    <input value={fiboIri} onChange={(event) => setFiboIri(event.target.value)} placeholder="https://…" />
+                                    Current graph {selectedSource.fiboTargetKind}
+                                    <select value={fiboLabel} onChange={(event) => setFiboLabel(event.target.value)}>
+                                        <option value="">Choose an exact graph {selectedSource.fiboTargetKind}</option>
+                                        {fiboLabel && !selectedTargetExists && <option value={fiboLabel}>Unavailable in current graph: {fiboLabel}</option>}
+                                        {targetOptions.map((item) => <option key={item.name} value={item.name} title={item.description}>{item.name}</option>)}
+                                    </select>
                                 </label>
                                 <label>
                                     Mapping rationale
                                     <textarea value={rationale} onChange={(event) => setRationale(event.target.value)} rows={3} placeholder="Why this legacy element maps to this FIBO term" />
                                 </label>
                             </div>
+
+                            {suggestion && (
+                                <div className="legacy-semantic-example">
+                                    <strong>Suggested graph target · verify before saving</strong>
+                                    <span>{suggestedTargetName} — {suggestion.rationale}</span>
+                                    <button type="button" onClick={() => { setFiboLabel(suggestedTargetName); setRationale(suggestion.rationale) }}>Use suggestion</button>
+                                </div>
+                            )}
+                            {mappingNote && (
+                                <div className="legacy-mapping-note"><strong>No direct target suggested</strong><span>{mappingNote}</span></div>
+                            )}
 
                             {selectedSource.sourceKind === 'field' && (
                                 <fieldset className="cde-fields">
@@ -240,9 +341,9 @@ export default function LegacyFiboMapping() {
                                 <div>
                                     {selectedMapping && <button className="mapping-delete" onClick={() => void deleteMapping()}>Delete</button>}
                                     {selectedMapping?.review_status !== 'reviewed' && (
-                                        <button onClick={() => void saveMapping('reviewed')} disabled={saving || !fiboIri.trim() || !fiboLabel.trim() || (isCde && !cdeDefinition.trim())}>Mark reviewed</button>
+                                        <button onClick={() => void saveMapping('reviewed')} disabled={saving || !selectedTargetExists || (isCde && !cdeDefinition.trim())}>Mark reviewed</button>
                                     )}
-                                    <button className="mapping-save" onClick={() => void saveMapping('draft')} disabled={saving || !fiboIri.trim() || !fiboLabel.trim() || (isCde && !cdeDefinition.trim())}>
+                                    <button className="mapping-save" onClick={() => void saveMapping('draft')} disabled={saving || !selectedTargetExists || (isCde && !cdeDefinition.trim())}>
                                         {saving ? 'Saving…' : selectedMapping ? 'Save changes' : 'Save mapping'}
                                     </button>
                                 </div>

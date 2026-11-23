@@ -22,6 +22,36 @@ if database_url.startswith("postgresql+asyncpg://"):
 
 engine = create_engine(database_url, pool_pre_ping=True)
 legacyFiboRouter = APIRouter(prefix="/legacy-fibo-mapping", tags=["Legacy to FIBO Mapping"])
+LOAN_MODEL_PATH = PROJECT_ROOT / "fibo" / "loan" / "neo4j_importer_model.json"
+
+
+def _fibo_vocabulary() -> dict[str, list[dict[str, str]]]:
+    model = json.loads(LOAN_MODEL_PATH.read_text(encoding="utf-8"))
+    schema = model["dataModel"]["graphSchemaRepresentation"]["graphSchema"]
+    return {
+        "classes": [
+            {"name": item["token"], "description": item.get("description", "")}
+            for item in schema.get("nodeLabels", [])
+        ],
+        "properties": [
+            {
+                "name": f"{item['token']}.{prop['token']}",
+                "domain": item["token"],
+                "description": prop.get("description", ""),
+            }
+            for item in schema.get("nodeLabels", [])
+            for prop in item.get("properties", [])
+        ],
+        "relationships": [
+            {"name": item["token"], "description": item.get("description", "")}
+            for item in schema.get("relationshipTypes", [])
+        ],
+    }
+
+
+@legacyFiboRouter.get("/targets")
+def list_fibo_targets():
+    return _fibo_vocabulary()
 
 
 @legacyFiboRouter.get("/sources")
@@ -92,7 +122,7 @@ def list_legacy_sources():
                     "sourceField": field_name,
                     "graphElement": f"{table_name}.{field_name} → {target_table}.{target_field}",
                     "description": f"Foreign-key relationship from {table_name}.{field_name} to {target_table}.{target_field}.",
-                    "fiboTargetKind": "property",
+                    "fiboTargetKind": "relationship",
                 })
 
     return {
@@ -108,8 +138,8 @@ class MappingInput(BaseModel):
     source_table: str
     source_field: str | None = None
     graph_element: str
-    fibo_target_kind: Literal["class", "property"]
-    fibo_iri: str
+    fibo_target_kind: Literal["class", "property", "relationship"]
+    fibo_iri: str | None = None
     fibo_label: str
     rationale: str = ""
     is_cde: bool = False
@@ -118,7 +148,9 @@ class MappingInput(BaseModel):
 
     @field_validator("fibo_iri")
     @classmethod
-    def require_absolute_iri(cls, value: str) -> str:
+    def require_absolute_iri_when_provided(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
         value = value.strip()
         if not value.startswith(("https://", "http://")):
             raise ValueError("FIBO IRI must be an absolute HTTP or HTTPS URI")
@@ -126,9 +158,21 @@ class MappingInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_target_and_cde(self) -> MappingInput:
-        expected_target = "class" if self.source_kind == "entity" else "property"
+        expected_target = {
+            "entity": "class",
+            "field": "property",
+            "relationship": "relationship",
+        }[self.source_kind]
         if self.fibo_target_kind != expected_target:
             raise ValueError(f"{self.source_kind} sources must map to a FIBO {expected_target}")
+        vocabulary_key = {
+            "class": "classes",
+            "property": "properties",
+            "relationship": "relationships",
+        }[self.fibo_target_kind]
+        valid_names = {item["name"] for item in _fibo_vocabulary()[vocabulary_key]}
+        if self.fibo_label not in valid_names:
+            raise ValueError(f"Choose a {self.fibo_target_kind} label from the current loan graph vocabulary")
         if self.is_cde and self.source_kind != "field":
             raise ValueError("CDE designation applies to legacy fields")
         if self.is_cde and not (self.cde_definition or "").strip():

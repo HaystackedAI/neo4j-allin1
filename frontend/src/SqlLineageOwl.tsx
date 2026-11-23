@@ -231,16 +231,7 @@ export default function SqlLineageOwl() {
 
                 <aside className="sql-lineage-owl-saved">
                     <h2>Saved SQL</h2>
-                    <label className="sql-lineage-owl-name">
-                        Query name
-                        <input
-                            value={queryName}
-                            onChange={(event) => setQueryName(event.target.value)}
-                            placeholder="Query name"
-                        />
-                    </label>
                     <label className="sql-lineage-owl-editor">
-                        SQL
                         <textarea
                             value={sql}
                             onChange={(event) => setSql(event.target.value)}

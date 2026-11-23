@@ -1,0 +1,18 @@
+name: Sync Fork
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          gh repo sync xaibookshub/cypher-fibo-ontology \
+            --source HaystackedAI/neo4j-allin1 \
+            --branch main

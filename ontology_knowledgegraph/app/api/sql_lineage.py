@@ -126,6 +126,35 @@ def _mapping_rows() -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _interactive_mapping_rows(sql: str) -> list[dict[str, Any]]:
+    source_queries = load_sql_lineage()[2]
+    interactive_queries = parse_sql_lineage(sql)
+    source_queries_by_statement = {query["statement"]: query for query in source_queries}
+    interactive_source_refs: dict[str, str] = {}
+
+    for interactive_query in interactive_queries:
+        source_query = source_queries_by_statement.get(interactive_query["statement"])
+        if source_query is None:
+            continue
+
+        interactive_source_refs[source_query["sourceRef"]] = interactive_query["sourceRef"]
+        source_outputs = {output["name"]: output for output in source_query["outputs"]}
+        interactive_outputs = {output["name"]: output for output in interactive_query["outputs"]}
+        for name in source_outputs.keys() & interactive_outputs.keys():
+            interactive_source_refs[source_outputs[name]["sourceRef"]] = interactive_outputs[name]["sourceRef"]
+
+        source_joins = [clause for clause in source_query["clauses"] if clause["clauseKind"] == "join"]
+        interactive_joins = [clause for clause in interactive_query["clauses"] if clause["clauseKind"] == "join"]
+        for source_join, interactive_join in zip(source_joins, interactive_joins):
+            interactive_source_refs[source_join["sourceRef"]] = interactive_join["sourceRef"]
+
+    return [
+        {**mapping, "source_ref": interactive_source_refs[mapping["source_ref"]]}
+        for mapping in _mapping_rows()
+        if mapping["source_ref"] in interactive_source_refs
+    ]
+
+
 def _ensure_graph_constraints() -> None:
     neo4jconn.run(
         "CREATE CONSTRAINT legacy_sql_source_key IF NOT EXISTS "
@@ -145,9 +174,11 @@ def _sync_to_graph(
     source_key: str = SOURCE_KEY,
     sql: str | None = None,
     file_name: str | None = None,
+    mappings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     file_name, sql, source_hash, queries, input_fields, source_tables = _source_and_graph_payload(sql, file_name)
-    mappings = _mapping_rows() if source_key == SOURCE_KEY else []
+    if mappings is None:
+        mappings = _mapping_rows() if source_key == SOURCE_KEY else []
     terms, property_links, relationship_links = _term_catalog()
     term_keys = {term["termKey"] for term in terms}
 
@@ -399,7 +430,8 @@ def analyze_sql_lineage(request: SqlLineageRequest):
     source_hash = hashlib.sha256(request.sql.encode("utf-8")).hexdigest()
     source_key = f"interactive-sql/{source_hash}"
     try:
-        _sync_to_graph(source_key, request.sql, "SQL Input.sql")
+        mappings = _interactive_mapping_rows(request.sql)
+        _sync_to_graph(source_key, request.sql, "SQL Input.sql", mappings)
         return _get_sql_lineage(source_key)
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Could not build lineage for SQL input: {error}") from error

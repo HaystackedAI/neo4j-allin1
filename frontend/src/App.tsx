@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import BorrowerProfile, { type BorrowerProfileData } from './BorrowerProfile'
 import OntologyMapping from './OntologyMapping'
 import LegacyFiboMapping from './LegacyFiboMapping'
+import SqlLineage from './SqlLineage'
 import './App.css'
 
 type SavedQuery = {
@@ -33,7 +34,7 @@ function App() {
     const [borrowerProfile, setBorrowerProfile] = useState<BorrowerProfileData | null>(null)
     const [error, setError] = useState('')
     const [running, setRunning] = useState(false)
-    const [activePage, setActivePage] = useState<'explore' | 'mapping' | 'legacy-fibo'>('explore')
+    const [activePage, setActivePage] = useState<'explore' | 'mapping' | 'legacy-fibo' | 'sql-lineage'>('explore')
 
     async function loadSavedQueries() {
         const response = await fetch(`${API_BASE}/neo4j/saved-queries`)
@@ -162,6 +163,11 @@ function App() {
                         href="#legacy-fibo"
                         onClick={() => setActivePage('legacy-fibo')}
                     >Legacy → FIBO</a>
+                    <a
+                        className={activePage === 'sql-lineage' ? 'nav-link active' : 'nav-link'}
+                        href="#sql-lineage"
+                        onClick={() => setActivePage('sql-lineage')}
+                    >SQL Lineage</a>
                     <a className="nav-link" href="#govern">Govern</a>
                     <a className="nav-link" href="#chat">Chat</a>
                     <a className="nav-link" href="#admin">Admin</a>
@@ -172,6 +178,8 @@ function App() {
                         ? <OntologyMapping />
                         : activePage === 'legacy-fibo'
                             ? <LegacyFiboMapping />
+                            : activePage === 'sql-lineage'
+                                ? <SqlLineage />
                             : <>
                     <div className="content-heading">
                         <h1>Explore</h1>

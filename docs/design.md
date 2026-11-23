@@ -55,3 +55,8 @@ Select Borrower → FastAPI → Parameterized Cypher → Neo4j → Structured Re
 Yes. Ontology Mapping fits well as the next workflow, using the loan graph’s existing FIBO mappings as the starting point.
 
 A practical first step is to choose one loan graph entity or property—such as Loan, currentBalance, or borrowerRole—and show its mapped FIBO class or property, including the mapping source and confidence if those are available. We can inspect the importer model to see what mapping metadata it actually contains, then shape the workflow around that.
+
+
+rbc.md describes the platform’s main outcome as business-readable lineage from legacy SQL, with CDEs linked to ontology terms.
+
+The app currently has borrower exploration and legacy-to-graph mapping, but no SQL lineage feature. The next step should be a separate SQL Lineage workflow that reads the legacy SQL and shows table/column dependencies, then lets users connect those lineage elements to saved mappings and CDEs. The existing legacy_loan_demo.sql is a suitable synthetic input.

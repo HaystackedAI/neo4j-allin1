@@ -1,3 +1,5 @@
+import RelationshipExplorer from './RelationshipExplorer'
+
 export type BorrowerLoan = {
     loanId: string
     borrowerRole: string
@@ -28,6 +30,11 @@ export default function BorrowerProfile({ profile }: Props) {
         <section className="borrower-profile">
             <h2>{profile.borrowerName}</h2>
             <p>Borrower ID: {profile.borrowerId}</p>
+            <RelationshipExplorer
+                nodeLabel="Person"
+                nodeId={profile.borrowerId}
+                displayName={profile.borrowerName}
+            />
 
             <h3>Loans ({profile.loans.length})</h3>
             {profile.loans.length === 0 ? (
@@ -43,6 +50,11 @@ export default function BorrowerProfile({ profile }: Props) {
                             <div>Interest rate: {loan.interestRate}%</div>
                             <div>Origination: {loan.originationDate}</div>
                             <div>Maturity: {loan.maturityDate}</div>
+                            <RelationshipExplorer
+                                nodeLabel="Loan"
+                                nodeId={loan.loanId}
+                                displayName={loan.loanId}
+                            />
                         </li>
                     ))}
                 </ul>

@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 
@@ -14,6 +14,17 @@ from app.config import get_settings_singleton
 loanRou = APIRouter()
 neo4jconn = FiboConnector()
 logger = logging.getLogger("app.http")
+NODE_ID_PROPERTIES = {
+    "Person": "personId",
+    "Loan": "loanId",
+    "LoanApplication": "applicationId",
+    "LoanProduct": "productId",
+    "Property": "propertyId",
+    "Appraisal": "appraisalId",
+    "Payment": "paymentId",
+    "FinancialInstitution": "institutionId",
+    "LoanOfficer": "officerId",
+}
 settings = get_settings_singleton()
 pg_url = os.getenv("PG_URL") or os.getenv("DATABASE_URL") or settings.TOO_SB_DB
 if pg_url.startswith("postgresql+asyncpg://"):
@@ -67,3 +78,43 @@ def borrower_360(borrower_id: str):
         } AS borrower
     """
     return neo4jconn.run(cypher, {"borrower_id": borrower_id})
+
+
+@loanRou.get("/nodes/{label}/{node_id}/connections")
+def node_connections(label: str, node_id: str):
+    id_property = NODE_ID_PROPERTIES.get(label)
+    if id_property is None:
+        raise HTTPException(status_code=400, detail=f"Unsupported node label: {label}")
+
+    cypher = f"""
+        MATCH (source:`{label}` {{{id_property}: $node_id}})-[relationship]-(neighbor)
+        WITH source, relationship, neighbor,
+             CASE
+                 WHEN neighbor:Person THEN neighbor.personId
+                 WHEN neighbor:Loan THEN neighbor.loanId
+                 WHEN neighbor:LoanApplication THEN neighbor.applicationId
+                 WHEN neighbor:LoanProduct THEN neighbor.productId
+                 WHEN neighbor:Property THEN neighbor.propertyId
+                 WHEN neighbor:Appraisal THEN neighbor.appraisalId
+                 WHEN neighbor:Payment THEN neighbor.paymentId
+                 WHEN neighbor:FinancialInstitution THEN neighbor.institutionId
+                 WHEN neighbor:LoanOfficer THEN neighbor.officerId
+             END AS neighbor_id,
+             CASE
+                 WHEN neighbor:Person THEN neighbor.name
+                 WHEN neighbor:Loan THEN neighbor.loanId
+                 WHEN neighbor:LoanApplication THEN neighbor.applicationId
+                 WHEN neighbor:LoanProduct THEN neighbor.name
+                 WHEN neighbor:Property THEN neighbor.address
+                 WHEN neighbor:Appraisal THEN neighbor.appraisalId
+                 WHEN neighbor:Payment THEN neighbor.paymentId
+                 WHEN neighbor:FinancialInstitution THEN neighbor.name
+                 WHEN neighbor:LoanOfficer THEN neighbor.name
+             END AS neighbor_name
+        RETURN type(relationship) AS relationshipType,
+               CASE WHEN startNode(relationship) = source THEN 'outgoing' ELSE 'incoming' END AS direction,
+               properties(relationship) AS relationshipProperties,
+               {{label: labels(neighbor)[0], id: neighbor_id, name: neighbor_name}} AS node
+        ORDER BY relationshipType, node.name
+    """
+    return neo4jconn.run(cypher, {"node_id": node_id})

@@ -152,32 +152,34 @@ function App() {
                 </nav>
 
                 <main className="content">
-                    <h1>Explore</h1>
+                    <div className="content-heading">
+                        <h1>Explore</h1>
+                        <label className="borrower-select">
+                            Select borrower
+                            <select
+                                value={selectedBorrowerId}
+                                onChange={(event) => void loadBorrowerProfile(event.target.value)}
+                            >
+                                <option value="">Choose a borrower</option>
+                                {borrowers.map((borrower) => (
+                                    <option key={borrower.borrowerId} value={borrower.borrowerId}>
+                                        {borrower.borrowerName} ({borrower.borrowerId})
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    </div>
                     {error && <pre className="error-output">{error}</pre>}
                     <div className="panes">
                         <section className="pane result-pane">
-                            <label className="borrower-select">
-                                Select borrower
-                                <select
-                                    value={selectedBorrowerId}
-                                    onChange={(event) => void loadBorrowerProfile(event.target.value)}
-                                >
-                                    <option value="">Choose a borrower</option>
-                                    {borrowers.map((borrower) => (
-                                        <option key={borrower.borrowerId} value={borrower.borrowerId}>
-                                            {borrower.borrowerName} ({borrower.borrowerId})
-                                        </option>
-                                    ))}
-                                </select>
-                            </label>
-
-                            <BorrowerProfile profile={borrowerProfile} />
-
-                            <h3>Cypher result</h3>
+                            <h2>Cypher result</h2>
+                            {borrowerProfile ? <BorrowerProfile profile={borrowerProfile} /> : null}
                             <pre className="result-output">
-                                {result === null
-                                    ? 'Run a Cypher query to see its returned records.'
-                                    : JSON.stringify(result, null, 2)}
+                                {result !== null
+                                    ? JSON.stringify(result, null, 2)
+                                    : borrowerProfile
+                                        ? ''
+                                        : 'Run a Cypher query or select a borrower to see returned data.'}
                             </pre>
                         </section>
 

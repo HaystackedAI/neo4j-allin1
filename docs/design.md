@@ -51,3 +51,5 @@ ontology_knowledgegraph/
 
 Start with Borrower 360. It gives you a concrete end-to-end business workflow:
 Select Borrower → FastAPI → Parameterized Cypher → Neo4j → Structured Result → React UI
+
+Relationship exploration — click a node to expand its connected entities and relationships. Let users navigate the graph without writing Cypher.

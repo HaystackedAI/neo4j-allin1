@@ -1,31 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import './LegacyFiboMapping.css'
 
-type FieldSource = {
-    sourceField: string
-    graphProperty: string
-    description: string
-}
-
-type EntitySource = {
-    name: string
-    source: string
-    description: string
-    properties: FieldSource[]
-}
-
-type RelationshipSource = {
-    name: string
-    source: string
-    from: string[]
-    to: string[]
-    description: string
-    properties: FieldSource[]
-}
-
 type SourceCatalog = {
-    entities: EntitySource[]
-    relationships: RelationshipSource[]
+    sourceSystem: string
+    sourceFile: string
+    elements: LegacySource[]
 }
 
 type LegacySource = {
@@ -36,6 +15,7 @@ type LegacySource = {
     graphElement: string
     description: string
     fiboTargetKind: 'class' | 'property'
+    semanticExample?: string | null
 }
 
 type FiboMapping = {
@@ -55,59 +35,6 @@ type FiboMapping = {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
-
-function buildSources(catalog: SourceCatalog): LegacySource[] {
-    const sources: LegacySource[] = []
-
-    for (const entity of catalog.entities) {
-        sources.push({
-            sourceRef: `entity|${entity.source}|${entity.name}`,
-            sourceKind: 'entity',
-            sourceTable: entity.source,
-            sourceField: null,
-            graphElement: entity.name,
-            description: entity.description,
-            fiboTargetKind: 'class',
-        })
-        for (const field of entity.properties) {
-            sources.push({
-                sourceRef: `field|${entity.source}|${field.sourceField}`,
-                sourceKind: 'field',
-                sourceTable: entity.source,
-                sourceField: field.sourceField,
-                graphElement: field.graphProperty,
-                description: field.description,
-                fiboTargetKind: 'property',
-            })
-        }
-    }
-
-    for (const relationship of catalog.relationships) {
-        const relationPath = `${relationship.from.join(', ')}-[${relationship.name}]->${relationship.to.join(', ')}`
-        sources.push({
-            sourceRef: `relationship|${relationship.source}|${relationship.name}`,
-            sourceKind: 'relationship',
-            sourceTable: relationship.source,
-            sourceField: null,
-            graphElement: relationPath,
-            description: relationship.description,
-            fiboTargetKind: 'property',
-        })
-        for (const field of relationship.properties) {
-            sources.push({
-                sourceRef: `field|${relationship.source}|${field.sourceField}`,
-                sourceKind: 'field',
-                sourceTable: relationship.source,
-                sourceField: field.sourceField,
-                graphElement: `${relationship.name}.${field.graphProperty}`,
-                description: field.description,
-                fiboTargetKind: 'property',
-            })
-        }
-    }
-
-    return sources
-}
 
 export default function LegacyFiboMapping() {
     const [sources, setSources] = useState<LegacySource[]>([])
@@ -130,7 +57,7 @@ export default function LegacyFiboMapping() {
 
     useEffect(() => {
         Promise.all([
-            fetch(`${API_BASE}/loan/ontology-mappings`).then(async (response) => {
+            fetch(`${API_BASE}/legacy-fibo-mapping/sources`).then(async (response) => {
                 if (!response.ok) throw new Error(await response.text())
                 return await response.json() as SourceCatalog
             }),
@@ -139,7 +66,7 @@ export default function LegacyFiboMapping() {
                 return await response.json() as FiboMapping[]
             }),
         ]).then(([catalog, existingMappings]) => {
-            setSources(buildSources(catalog))
+            setSources(catalog.elements)
             setMappings(existingMappings)
         }).catch((cause: unknown) => {
             setError(cause instanceof Error ? cause.message : String(cause))
@@ -156,7 +83,7 @@ export default function LegacyFiboMapping() {
         const needle = filter.trim().toLowerCase()
         if (!needle) return sources
         return sources.filter((source) =>
-            `${source.sourceTable} ${source.sourceField ?? ''} ${source.graphElement}`
+            `${source.sourceTable} ${source.sourceField ?? ''} ${source.graphElement} ${source.description}`
                 .toLowerCase()
                 .includes(needle),
         )
@@ -236,7 +163,7 @@ export default function LegacyFiboMapping() {
             </div>
 
             <div className="legacy-fibo-note">
-                Source mappings come from the loan importer model. Enter the FIBO label and absolute IRI; the model does not include a FIBO term catalogue.
+                Sources come from the synthetic legacy SQL schema. It includes tables, fields, and foreign-key relationships; the demo SQL and its sample records are not loaded automatically.
             </div>
             {error && <pre className="legacy-fibo-error">{error}</pre>}
 
@@ -256,7 +183,7 @@ export default function LegacyFiboMapping() {
                                 className={selectedRef === source.sourceRef ? 'legacy-source selected' : 'legacy-source'}
                                 onClick={() => setSelectedRef(source.sourceRef)}
                             >
-                                <strong>{source.sourceField ? `${source.sourceTable}.${source.sourceField}` : `${source.sourceTable} · ${source.graphElement}`}</strong>
+                                <strong>{source.sourceKind === 'relationship' ? source.graphElement : source.sourceField ? `${source.sourceTable}.${source.sourceField}` : source.sourceTable}</strong>
                                 <span>{source.sourceKind} → FIBO {source.fiboTargetKind}</span>
                                 {mapping && <span className={`mapping-status ${mapping.review_status}`}>{mapping.review_status}{mapping.is_cde ? ' · CDE' : ''}</span>}
                             </button>
@@ -271,9 +198,10 @@ export default function LegacyFiboMapping() {
                         <>
                             <div className="legacy-source-summary">
                                 <span>{selectedSource.sourceKind} → FIBO {selectedSource.fiboTargetKind}</span>
-                                <h2>{selectedSource.sourceField ? `${selectedSource.sourceTable}.${selectedSource.sourceField}` : `${selectedSource.sourceTable} · ${selectedSource.graphElement}`}</h2>
+                                <h2>{selectedSource.sourceKind === 'relationship' ? selectedSource.graphElement : selectedSource.sourceField ? `${selectedSource.sourceTable}.${selectedSource.sourceField}` : selectedSource.sourceTable}</h2>
                                 <p>{selectedSource.description}</p>
-                                <small>Graph element: {selectedSource.graphElement}</small>
+                                <small>Legacy source element: {selectedSource.graphElement}</small>
+                                {selectedSource.semanticExample && <div className="legacy-semantic-example"><strong>Data dictionary example</strong><span>{selectedSource.semanticExample}</span></div>}
                             </div>
 
                             <div className="fibo-target-fields">

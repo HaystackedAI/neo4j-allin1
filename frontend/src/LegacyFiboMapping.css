@@ -12,6 +12,8 @@
 .legacy-source:hover, .legacy-source.selected { background: #dbeafe; }
 .legacy-source strong { font-size: 11px; overflow-wrap: anywhere; }
 .legacy-source span { color: #64748b; font-size: 10px; }
+.legacy-semantic-example { display: grid; gap: 4px; margin-top: 14px; padding: 10px 12px; border-left: 3px solid #64748b; background: #f8fafc; color: #334155; font-size: 11px; }
+.legacy-semantic-example span { color: #475569; }
 .legacy-source .mapping-status { color: #92400e; text-transform: capitalize; }
 .legacy-source .mapping-status.reviewed { color: #166534; }
 .legacy-fibo-editor { min-width: 0; padding: 18px; overflow: auto; }

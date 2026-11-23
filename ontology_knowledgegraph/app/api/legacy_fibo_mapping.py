@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +22,84 @@ if database_url.startswith("postgresql+asyncpg://"):
 
 engine = create_engine(database_url, pool_pre_ping=True)
 legacyFiboRouter = APIRouter(prefix="/legacy-fibo-mapping", tags=["Legacy to FIBO Mapping"])
+
+
+@legacyFiboRouter.get("/sources")
+def list_legacy_sources():
+    legacy_dir = PROJECT_ROOT / "fibo" / "legacy"
+    sql = (legacy_dir / "legacy_loan_demo.sql").read_text(encoding="utf-8")
+    dictionary = json.loads((legacy_dir / "data_dictionary.json").read_text(encoding="utf-8"))
+    table_descriptions: dict[str, str] = dictionary["tables"]
+    semantic_examples = {
+        (table, field): meaning
+        for table, field, meaning in dictionary.get("mapping_examples", [])
+    }
+
+    elements = []
+    table_blocks = re.finditer(
+        r"CREATE\s+TABLE\s+(\w+)\s*\((.*?)\);", sql, flags=re.IGNORECASE | re.DOTALL
+    )
+    for table_match in table_blocks:
+        table_name, body = table_match.groups()
+        table_name = table_name.upper()
+        table_description = table_descriptions.get(table_name, "Legacy source table.")
+        elements.append({
+            "sourceRef": f"entity|{table_name}",
+            "sourceKind": "entity",
+            "sourceTable": table_name,
+            "sourceField": None,
+            "graphElement": table_name,
+            "description": table_description,
+            "fiboTargetKind": "class",
+        })
+
+        for line in body.splitlines():
+            column_definition, _, inline_comment = line.partition("--")
+            column_definition = column_definition.strip().rstrip(",").strip()
+            column = re.match(r"([A-Za-z_]\w*)\s+(.+)$", column_definition)
+            if not column:
+                continue
+            field_name, definition = column.groups()
+            if field_name.upper() in {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}:
+                continue
+            field_name = field_name.upper()
+            data_type = definition.split()[0].upper()
+            meaning = semantic_examples.get((table_name, field_name))
+            details = [f"{table_name}.{field_name} ({data_type})"]
+            if inline_comment:
+                details.append(inline_comment.strip())
+            if meaning:
+                details.append(f"Starter semantic example: {meaning}")
+            elements.append({
+                "sourceRef": f"field|{table_name}|{field_name}",
+                "sourceKind": "field",
+                "sourceTable": table_name,
+                "sourceField": field_name,
+                "graphElement": field_name,
+                "description": " · ".join(details),
+                "fiboTargetKind": "property",
+                "semanticExample": meaning,
+            })
+
+            reference = re.search(r"\bREFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)", definition, re.IGNORECASE)
+            if reference:
+                target_table, target_field = reference.groups()
+                target_table, target_field = target_table.upper(), target_field.upper()
+                elements.append({
+                    "sourceRef": f"relationship|{table_name}|{field_name}|{target_table}|{target_field}",
+                    "sourceKind": "relationship",
+                    "sourceTable": table_name,
+                    "sourceField": field_name,
+                    "graphElement": f"{table_name}.{field_name} → {target_table}.{target_field}",
+                    "description": f"Foreign-key relationship from {table_name}.{field_name} to {target_table}.{target_field}.",
+                    "fiboTargetKind": "property",
+                })
+
+    return {
+        "sourceSystem": "Synthetic legacy commercial-loan SQL schema",
+        "sourceFile": "fibo/legacy/legacy_loan_demo.sql",
+        "elements": elements,
+    }
 
 
 class MappingInput(BaseModel):

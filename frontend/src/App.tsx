@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import BorrowerProfile, { type BorrowerProfileData } from './BorrowerProfile'
 import OntologyMapping from './OntologyMapping'
+import LegacyFiboMapping from './LegacyFiboMapping'
 import './App.css'
 
 type SavedQuery = {
@@ -32,7 +33,7 @@ function App() {
     const [borrowerProfile, setBorrowerProfile] = useState<BorrowerProfileData | null>(null)
     const [error, setError] = useState('')
     const [running, setRunning] = useState(false)
-    const [activePage, setActivePage] = useState<'explore' | 'mapping'>('explore')
+    const [activePage, setActivePage] = useState<'explore' | 'mapping' | 'legacy-fibo'>('explore')
 
     async function loadSavedQueries() {
         const response = await fetch(`${API_BASE}/neo4j/saved-queries`)
@@ -156,13 +157,22 @@ function App() {
                         href="#mapping"
                         onClick={() => setActivePage('mapping')}
                     >Ontology Mapping</a>
+                    <a
+                        className={activePage === 'legacy-fibo' ? 'nav-link active' : 'nav-link'}
+                        href="#legacy-fibo"
+                        onClick={() => setActivePage('legacy-fibo')}
+                    >Legacy → FIBO</a>
                     <a className="nav-link" href="#govern">Govern</a>
                     <a className="nav-link" href="#chat">Chat</a>
                     <a className="nav-link" href="#admin">Admin</a>
                 </nav>
 
                 <main className="content">
-                    {activePage === 'mapping' ? <OntologyMapping /> : <>
+                    {activePage === 'mapping'
+                        ? <OntologyMapping />
+                        : activePage === 'legacy-fibo'
+                            ? <LegacyFiboMapping />
+                            : <>
                     <div className="content-heading">
                         <h1>Explore</h1>
                         <label className="borrower-select">
@@ -223,7 +233,7 @@ function App() {
                             </div>
                         </section>
                     </div>
-                    </>}
+                            </>}
                 </main>
             </div>
         </div>

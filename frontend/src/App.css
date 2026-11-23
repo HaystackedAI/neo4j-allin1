@@ -83,7 +83,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .nav-link.active { background: #dbeafe; color: #1d4ed8; }
 
 .content { flex: 1; min-width: 0; padding: 24px; text-align: left; }
-.content-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.content-heading { display: flex; align-items: center; justify-content: flex-start; gap: 20px; margin-bottom: 20px; }
 .content h1 { margin: 0; font-size: 32px; }
 .borrower-select { display: flex; align-items: center; gap: 10px; font-size: 14px; }
 .borrower-select select { min-width: 220px; max-width: 340px; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; font: 13px var(--sans); }

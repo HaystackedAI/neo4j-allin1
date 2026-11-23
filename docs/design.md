@@ -52,4 +52,6 @@ ontology_knowledgegraph/
 Start with Borrower 360. It gives you a concrete end-to-end business workflow:
 Select Borrower → FastAPI → Parameterized Cypher → Neo4j → Structured Result → React UI
 
-Relationship exploration — click a node to expand its connected entities and relationships. Let users navigate the graph without writing Cypher.
+Yes. Ontology Mapping fits well as the next workflow, using the loan graph’s existing FIBO mappings as the starting point.
+
+A practical first step is to choose one loan graph entity or property—such as Loan, currentBalance, or borrowerRole—and show its mapped FIBO class or property, including the mapping source and confidence if those are available. We can inspect the importer model to see what mapping metadata it actually contains, then shape the workflow around that.

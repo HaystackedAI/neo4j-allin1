@@ -145,7 +145,7 @@ function App() {
             <div className="workspace">
                 <nav className="sidebar">
                     <a className="nav-link active" href="#explore">Explore</a>
-                    <a className="nav-link" href="#curate">Curate</a>
+                    <a className="nav-link" href="#mapping">Ontology Mapping</a>
                     <a className="nav-link" href="#govern">Govern</a>
                     <a className="nav-link" href="#chat">Chat</a>
                     <a className="nav-link" href="#admin">Admin</a>
@@ -155,7 +155,7 @@ function App() {
                     <div className="content-heading">
                         <h1>Explore</h1>
                         <label className="borrower-select">
-                            Select borrower
+                            Borrower
                             <select
                                 value={selectedBorrowerId}
                                 onChange={(event) => void loadBorrowerProfile(event.target.value)}

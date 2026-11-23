@@ -32,6 +32,7 @@ export default function BorrowerProfile({ profile }: Props) {
             <p>Borrower ID: {profile.borrowerId}</p>
             <RelationshipExplorer
                 nodeLabel="Person"
+                idProperty="personId"
                 nodeId={profile.borrowerId}
                 displayName={profile.borrowerName}
             />
@@ -52,6 +53,7 @@ export default function BorrowerProfile({ profile }: Props) {
                             <div>Maturity: {loan.maturityDate}</div>
                             <RelationshipExplorer
                                 nodeLabel="Loan"
+                                idProperty="loanId"
                                 nodeId={loan.loanId}
                                 displayName={loan.loanId}
                             />

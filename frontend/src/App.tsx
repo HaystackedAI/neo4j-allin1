@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import BorrowerProfile, { type BorrowerProfileData } from './BorrowerProfile'
 import './App.css'
-
 
 type SavedQuery = {
     id: number
     name: string
     cypher: string
     created_at: string
+}
+
+type BorrowerOption = {
+    borrowerId: string
+    borrowerName: string
+}
+
+type BorrowerProfileResponse = {
+    borrower: BorrowerProfileData
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -17,6 +26,9 @@ function App() {
     const [queryName, setQueryName] = useState('')
     const [result, setResult] = useState<unknown>(null)
     const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([])
+    const [borrowers, setBorrowers] = useState<BorrowerOption[]>([])
+    const [selectedBorrowerId, setSelectedBorrowerId] = useState('')
+    const [borrowerProfile, setBorrowerProfile] = useState<BorrowerProfileData | null>(null)
     const [error, setError] = useState('')
     const [running, setRunning] = useState(false)
 
@@ -30,7 +42,35 @@ function App() {
         loadSavedQueries().catch((cause: unknown) => {
             setError(cause instanceof Error ? cause.message : String(cause))
         })
+
+        fetch(`${API_BASE}/loan/borrowers`)
+            .then(async (response) => {
+                if (!response.ok) throw new Error(await response.text())
+                setBorrowers(await response.json() as BorrowerOption[])
+            })
+            .catch((cause: unknown) => {
+                setError(cause instanceof Error ? cause.message : String(cause))
+            })
     }, [])
+
+    async function loadBorrowerProfile(borrowerId: string) {
+        setSelectedBorrowerId(borrowerId)
+        setBorrowerProfile(null)
+        setError('')
+        if (!borrowerId) return
+
+        try {
+            const response = await fetch(
+                `${API_BASE}/loan/borrowers/${encodeURIComponent(borrowerId)}`,
+            )
+            if (!response.ok) throw new Error(await response.text())
+
+            const rows = await response.json() as BorrowerProfileResponse[]
+            setBorrowerProfile(rows[0]?.borrower ?? null)
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause))
+        }
+    }
 
     async function runQuery(cypher = query) {
         if (!cypher.trim()) return
@@ -49,7 +89,9 @@ function App() {
             } catch {
                 body = responseText
             }
-            if (!response.ok) throw new Error(typeof body === 'string' ? body : JSON.stringify(body))
+            if (!response.ok) {
+                throw new Error(typeof body === 'string' ? body : JSON.stringify(body))
+            }
             setResult(body)
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
@@ -114,20 +156,52 @@ function App() {
                     {error && <pre className="error-output">{error}</pre>}
                     <div className="panes">
                         <section className="pane result-pane">
-                            <h2>Query result</h2>
-                            <pre className="result-output">{result === null ? 'Run a Cypher query to see its returned records.' : JSON.stringify(result, null, 2)}</pre>
+                            <label className="borrower-select">
+                                Select borrower
+                                <select
+                                    value={selectedBorrowerId}
+                                    onChange={(event) => void loadBorrowerProfile(event.target.value)}
+                                >
+                                    <option value="">Choose a borrower</option>
+                                    {borrowers.map((borrower) => (
+                                        <option key={borrower.borrowerId} value={borrower.borrowerId}>
+                                            {borrower.borrowerName} ({borrower.borrowerId})
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            <BorrowerProfile profile={borrowerProfile} />
+
+                            <h3>Cypher result</h3>
+                            <pre className="result-output">
+                                {result === null
+                                    ? 'Run a Cypher query to see its returned records.'
+                                    : JSON.stringify(result, null, 2)}
+                            </pre>
                         </section>
+
                         <section className="pane saved-pane">
                             <div className="save-query-form">
-                                <input aria-label="Saved query name" placeholder="Query name" value={queryName} onChange={(event) => setQueryName(event.target.value)} />
-                                <button onClick={() => void saveQuery()} disabled={!query.trim() || !queryName.trim()}>Save</button>
+                                <input
+                                    aria-label="Saved query name"
+                                    placeholder="Query name"
+                                    value={queryName}
+                                    onChange={(event) => setQueryName(event.target.value)}
+                                />
+                                <button
+                                    onClick={() => void saveQuery()}
+                                    disabled={!query.trim() || !queryName.trim()}
+                                >
+                                    Save
+                                </button>
                             </div>
                             <div className="saved-query-list">
                                 {savedQueries.map((saved) => (
                                     <button
                                         className="saved-query-name"
                                         key={saved.id}
-                                        onClick={() => setQuery(String(saved.name))}
+                                        onClick={() => setQuery(saved.cypher)}
                                         title={saved.cypher}
                                     >
                                         {saved.name}

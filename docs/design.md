@@ -46,3 +46,8 @@ ontology_knowledgegraph/
 ├── frontend/                     # React UI: Explore, Curate, Govern, Chat, Admin
 ├── migrations/                   # PostgreSQL migrations, if relational storage remains
 └── main_build.py                 # Thin CLI for data/graph build tasks
+
+
+
+Start with Borrower 360. It gives you a concrete end-to-end business workflow:
+Select Borrower → FastAPI → Parameterized Cypher → Neo4j → Structured Result → React UI

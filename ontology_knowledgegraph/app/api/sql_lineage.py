@@ -32,6 +32,10 @@ class SavedSqlQueryRequest(BaseModel):
     sql: str
 
 
+class SqlLineageRequest(BaseModel):
+    sql: str
+
+
 def _term_catalog() -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
     model = json.loads(MODEL_PATH.read_text(encoding="utf-8"))
     data_model = model["dataModel"]
@@ -380,6 +384,25 @@ def sync_sql_lineage_to_graph():
         return {"synced": True, **_sync_to_graph()}
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"Could not synchronize SQL lineage to Neo4j: {error}") from error
+
+
+@sqlLineageRouter.post("/analyze")
+def analyze_sql_lineage(request: SqlLineageRequest):
+    if not request.sql.strip():
+        raise HTTPException(status_code=422, detail="SQL is required")
+    queries = parse_sql_lineage(request.sql)
+    if not queries:
+        raise HTTPException(status_code=422, detail="No supported SELECT statement with a FROM clause was found")
+    if len(queries) != 1:
+        raise HTTPException(status_code=422, detail="Analyze one SELECT statement at a time")
+
+    source_hash = hashlib.sha256(request.sql.encode("utf-8")).hexdigest()
+    source_key = f"interactive-sql/{source_hash}"
+    try:
+        _sync_to_graph(source_key, request.sql, "SQL Input.sql")
+        return _get_sql_lineage(source_key)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not build lineage for SQL input: {error}") from error
 
 
 @sqlLineageRouter.get("/saved-queries")

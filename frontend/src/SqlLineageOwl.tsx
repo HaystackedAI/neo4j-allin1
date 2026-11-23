@@ -70,13 +70,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 export default function SqlLineageOwl() {
     const [savedQueries, setSavedQueries] = useState<SavedSqlQuery[]>([])
-    const [queryName, setQueryName] = useState('')
     const [sql, setSql] = useState('')
     const [selectedQueryId, setSelectedQueryId] = useState<number | null>(null)
     const [lineage, setLineage] = useState<LineageResponse | null>(null)
     const [selectedOutputRef, setSelectedOutputRef] = useState('')
     const [error, setError] = useState('')
-    const [saving, setSaving] = useState(false)
     const [analyzing, setAnalyzing] = useState(false)
 
     async function loadSavedQueries() {
@@ -94,37 +92,18 @@ export default function SqlLineageOwl() {
     const selectedQuery = lineage?.queries[0]
     const selectedOutput = selectedQuery?.outputs.find((output) => output.sourceRef === selectedOutputRef)
 
-    async function saveQuery() {
-        if (!sql.trim() || !queryName.trim()) return
-        setSaving(true)
+    async function runLineage() {
+        if (!sql.trim()) return
         setError('')
-        try {
-            const response = await fetch(`${API_BASE}/sql-lineage/saved-queries`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: queryName.trim(), sql }),
-            })
-            if (!response.ok) throw new Error(await response.text())
-            setQueryName('')
-            await loadSavedQueries()
-        } catch (cause) {
-            setError(cause instanceof Error ? cause.message : String(cause))
-        } finally {
-            setSaving(false)
-        }
-    }
-
-    async function analyzeQuery(query: SavedSqlQuery) {
-        setSelectedQueryId(query.id)
         setLineage(null)
         setSelectedOutputRef('')
         setAnalyzing(true)
-        setError('')
         try {
-            const response = await fetch(
-                `${API_BASE}/sql-lineage/saved-queries/${query.id}/lineage`,
-                { method: 'POST' },
-            )
+            const response = await fetch(`${API_BASE}/sql-lineage/analyze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sql }),
+            })
             if (!response.ok) throw new Error(await response.text())
             const result = await response.json() as LineageResponse
             setLineage(result)
@@ -136,13 +115,41 @@ export default function SqlLineageOwl() {
         }
     }
 
+    function selectSavedQuery(query: SavedSqlQuery) {
+        setSelectedQueryId(query.id)
+        setLineage(null)
+        setSelectedOutputRef('')
+        setError('')
+        setSql(query.sql)
+    }
+
     return (
         <div className="sql-lineage-owl">
             <header className="sql-lineage-owl-heading">
                 <div>
                     <h1>SQL Lineage OWL</h1>
-                    <p>Save SQL statements and inspect lineage for one query at a time.</p>
+                    <p>Enter SQL or choose a saved statement, then run lineage.</p>
                 </div>
+                <textarea
+                    className="sql-lineage-owl-input"
+                    aria-label="SQL to analyze"
+                    value={sql}
+                    onChange={(event) => {
+                        setSql(event.target.value)
+                        setSelectedQueryId(null)
+                        setLineage(null)
+                        setSelectedOutputRef('')
+                    }}
+                    placeholder="Type or paste a SQL statement…"
+                    rows={4}
+                />
+                <button
+                    className="sql-lineage-owl-run"
+                    onClick={() => void runLineage()}
+                    disabled={analyzing || !sql.trim()}
+                >
+                    {analyzing ? 'Building lineage…' : 'Lineage'}
+                </button>
             </header>
             {error && <pre className="sql-lineage-error">{error}</pre>}
 
@@ -231,29 +238,13 @@ export default function SqlLineageOwl() {
 
                 <aside className="sql-lineage-owl-saved">
                     <h2>Saved SQL</h2>
-                    <label className="sql-lineage-owl-editor">
-                        <textarea
-                            value={sql}
-                            onChange={(event) => setSql(event.target.value)}
-                            placeholder="Paste SQL to save…"
-                            rows={8}
-                        />
-                    </label>
-                    <button
-                        className="sql-lineage-owl-save"
-                        onClick={() => void saveQuery()}
-                        disabled={saving || !queryName.trim() || !sql.trim()}
-                    >
-                        {saving ? 'Saving…' : 'Save SQL'}
-                    </button>
                     <div className="sql-lineage-owl-list">
                         {savedQueries.map((query) => (
                             <button
                                 key={query.id}
                                 className={selectedQueryId === query.id ? 'sql-lineage-owl-saved-query selected' : 'sql-lineage-owl-saved-query'}
-                                onClick={() => void analyzeQuery(query)}
+                                onClick={() => selectSavedQuery(query)}
                                 title={query.sql}
-                                disabled={analyzing}
                             >
                                 <strong>{query.name}</strong>
                                 <span>{query.sql.trim().replace(/\s+/g, ' ').slice(0, 100)}</span>

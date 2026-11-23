@@ -43,68 +43,38 @@ type FiboMapping = {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 const mappingSuggestions: Record<string, { label: string; domain?: string; rationale: string }> = {
-    'entity|LN_ACCT': {
+    'entity|SQL_Q1': {
         label: 'Loan',
-        rationale: 'Candidate: LN_ACCT is documented as an individual loan account or drawdown, corresponding to the Loan node in the current graph.',
+        rationale: 'Candidate: Query 1 returns one loan-level result row. Review that this result represents a Loan entity before saving.',
     },
-    'entity|LN_PAY_TXN': {
-        label: 'Payment',
-        rationale: 'Candidate: each LN_PAY_TXN row represents a payment transaction; confirm this matches the graph Payment node granularity.',
+    'field|SQL_Q1|LOAN_ID': {
+        label: 'loanId', domain: 'Loan',
+        rationale: 'Candidate: the output LOAN_ID identifies the loan represented by each query row.',
     },
-    'field|LN_ACCT|LN_NO': {
-        label: 'loanId',
-        domain: 'Loan',
-        rationale: 'Candidate: both identify an individual loan account.',
+    'field|SQL_Q1|ORIGINAL_AMOUNT': {
+        label: 'principalAmount', domain: 'Loan',
+        rationale: 'Candidate: the output is sourced from ORIG_AMT. Confirm it has the same meaning as loan principal.',
     },
-    'field|LN_ACCT|ORIG_AMT': {
-        label: 'principalAmount',
-        domain: 'Loan',
-        rationale: 'Candidate: ORIG_AMT is the original loan amount; confirm its definition matches the graph principal amount.',
+    'field|SQL_Q1|OUTSTANDING_BALANCE': {
+        label: 'currentBalance', domain: 'Loan',
+        rationale: 'Candidate: the output is sourced from OUT_BAL and represents outstanding loan balance.',
     },
-    'field|LN_ACCT|OUT_BAL': {
-        label: 'currentBalance',
-        domain: 'Loan',
-        rationale: 'Candidate: OUT_BAL is the outstanding loan balance.',
+    'field|SQL_Q1|MATURITY_DT': {
+        label: 'maturityDate', domain: 'Loan',
+        rationale: 'Candidate: the output is sourced from the loan maturity date.',
     },
-    'field|LN_ACCT|INT_RATE': {
-        label: 'interestRate',
-        domain: 'Loan',
-        rationale: 'Candidate: both describe the loan interest rate; confirm percentage units and scale.',
+    'field|SQL_Q4|OUTSTANDING_BALANCE': {
+        label: 'currentBalance', domain: 'Loan',
+        rationale: 'Candidate: this output carries the loan outstanding balance used in the collateral coverage calculation.',
     },
-    'field|LN_ACCT|BOOK_DT': {
-        label: 'originationDate',
-        domain: 'Loan',
-        rationale: 'Candidate: BOOK_DT may represent loan origination; confirm the source business definition.',
-    },
-    'field|LN_ACCT|MAT_DT': {
-        label: 'maturityDate',
-        domain: 'Loan',
-        rationale: 'Candidate: both represent the loan maturity date.',
-    },
-    'field|LN_ACCT|LN_STAT': {
-        label: 'status',
-        domain: 'Loan',
-        rationale: 'Candidate: both represent loan status; legacy code values may need normalization.',
-    },
-    'field|LN_PAY_TXN|TXN_NO': {
-        label: 'paymentId',
-        domain: 'Payment',
-        rationale: 'Candidate: TXN_NO identifies a payment transaction; confirm each transaction is modeled as a Payment.',
-    },
-    'relationship|LN_ACCT|CUST_NO|CUST_MST|CUST_NO': {
+    'clause|SQL_Q1|join|1': {
         label: 'BORROWER_ON',
-        rationale: 'Candidate: this foreign key links a loan account to its borrower/customer. Confirm direction and customer identity alignment with the graph relationship.',
+        rationale: 'Candidate: this join connects the loan borrower identifier to the customer identifier. Confirm identity resolution and relationship direction before saving.',
     },
-    'relationship|LN_PAY_TXN|LN_NO|LN_ACCT|LN_NO': {
-        label: 'HAS_PAYMENT',
-        rationale: 'Candidate: this foreign key links a loan account to its payment transactions.',
+    'clause|SQL_Q2|join|1': {
+        label: 'BORROWER_ON',
+        rationale: 'Candidate: this join associates customer rows with their loans. Confirm the customer represents a Person in the target graph.',
     },
-}
-
-const sourceMappingNotes: Record<string, string> = {
-    'entity|CUST_MST': 'CUST_MST is a customer / borrower legal-entity master, while the current graph has Person but no LegalEntity label. No direct target is suggested to avoid treating an organization as a person.',
-    'field|CUST_MST|CUST_NO': 'CUST_NO identifies a legal-entity customer. The current graph has Person.personId but no LegalEntity identifier property, so no direct target is suggested.',
-    'field|CUST_MST|LEGAL_NM': 'LEGAL_NM is a legal-entity name. The current graph has Person.name, which represents a person name; no direct target is suggested.',
 }
 
 export default function LegacyFiboMapping() {
@@ -124,6 +94,13 @@ export default function LegacyFiboMapping() {
         const response = await fetch(`${API_BASE}/legacy-fibo-mapping/mappings`)
         if (!response.ok) throw new Error(await response.text())
         setMappings(await response.json() as FiboMapping[])
+    }
+
+    async function syncLineageGraph() {
+        const response = await fetch(`${API_BASE}/sql-lineage/sync`, { method: 'POST' })
+        if (!response.ok) {
+            throw new Error(`Mapping saved in PostgreSQL, but Neo4j lineage sync failed: ${await response.text()}`)
+        }
     }
 
     useEffect(() => {
@@ -165,11 +142,6 @@ export default function LegacyFiboMapping() {
     const suggestedTargetName = suggestion
         ? (suggestion.domain ? `${suggestion.domain}.${suggestion.label}` : suggestion.label)
         : ''
-    const mappingNote = selectedSource
-        ? sourceMappingNotes[selectedSource.sourceRef] ?? (selectedSource.sourceTable === 'CUST_MST'
-            ? 'The current graph has no LegalEntity target, and this source table describes legal-entity customers. There may be no direct graph mapping for this element.'
-            : undefined)
-        : undefined
     const filteredSources = useMemo(() => {
         const needle = filter.trim().toLowerCase()
         if (!needle) return sources
@@ -220,6 +192,7 @@ export default function LegacyFiboMapping() {
             )
             if (!response.ok) throw new Error(await response.text())
             await loadMappings()
+            await syncLineageGraph()
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
         } finally {
@@ -237,6 +210,7 @@ export default function LegacyFiboMapping() {
             )
             if (!response.ok) throw new Error(await response.text())
             await loadMappings()
+            await syncLineageGraph()
         } catch (cause) {
             setError(cause instanceof Error ? cause.message : String(cause))
         }
@@ -253,7 +227,7 @@ export default function LegacyFiboMapping() {
             </div>
 
             <div className="legacy-fibo-note">
-                The current loan graph supplies the exact available labels, properties, and relationship types. FIBO IRIs are omitted for now. Suggestions are candidates to review, not confirmed mappings.
+                Sources are query outputs and join predicates from fibo/sql/sql.sql. The current loan graph supplies exact target terms. IRIs are omitted for now; suggestions are candidates, not confirmed mappings.
             </div>
             {error && <pre className="legacy-fibo-error">{error}</pre>}
 
@@ -315,9 +289,6 @@ export default function LegacyFiboMapping() {
                                     <span>{suggestedTargetName} — {suggestion.rationale}</span>
                                     <button type="button" onClick={() => { setFiboLabel(suggestedTargetName); setRationale(suggestion.rationale) }}>Use suggestion</button>
                                 </div>
-                            )}
-                            {mappingNote && (
-                                <div className="legacy-mapping-note"><strong>No direct target suggested</strong><span>{mappingNote}</span></div>
                             )}
 
                             {selectedSource.sourceKind === 'field' && (

@@ -1,92 +1,117 @@
 import { useEffect, useMemo, useState } from 'react'
 import './SqlLineage.css'
 
-type MappingInfo = {
-    fibo_target_kind: 'class' | 'property' | 'relationship'
-    fibo_label: string
-    rationale: string
-    is_cde: boolean
-    cde_definition: string | null
-    review_status: 'draft' | 'reviewed'
-} | null
-
-type ForeignKey = {
-    table: string
-    field: string
-    sourceRef: string
-    targetDescription: string
-} | null
-
-type LineageField = {
+type GraphTerm = {
+    termKey: string
+    termKind: 'class' | 'property' | 'relationship'
     name: string
-    dataType: string
-    nullable: boolean
-    primaryKey: boolean
-    foreignKey: ForeignKey
-    sqlComment: string | null
-    semanticExample: string | null
-    sourceLine: number
-    mapping: MappingInfo
-    relationshipMapping?: MappingInfo
+    domain?: string
 }
 
-type IncomingRelationship = {
-    sourceTable: string
-    sourceField: string
-    targetField: string
-    mapping: MappingInfo
+type TargetLink = {
+    term: GraphTerm
+    status: 'draft' | 'reviewed'
+    relationshipType: 'MAPS_TO' | 'PROPOSES_MAPPING_TO'
 }
 
-type LineageTable = {
-    name: string
-    description: string
-    sourceLine: number
+type InputColumn = {
     sourceRef: string
-    fields: LineageField[]
-    relationships: { field: string; table: string; targetField: string }[]
-    incomingRelationships: IncomingRelationship[]
-    mapping: MappingInfo
+    name: string
+    tableName: string
+    columnName: string
+}
+
+type OutputColumn = {
+    sourceRef: string
+    name: string
+    position: number
+    sqlExpression: string
+    expressionKind: 'direct' | 'derived' | 'aggregate'
+    isCde: boolean
+    cdeDefinition: string | null
+    mappingRationale: string | null
+    sourceColumns: InputColumn[]
+    mappings: TargetLink[]
+}
+
+type SqlClause = {
+    clauseKind: 'join' | 'filter' | 'grouping'
+    sqlExpression: string
+    sourceColumns: InputColumn[]
+    mappings: TargetLink[]
+    mappingRationale: string | null
+}
+
+type SqlQuery = {
+    queryId: string
+    queryNumber: number
+    name: string
+    lineStart: number
+    sqlStatement: string
+    tables: string[]
+    clauses: SqlClause[]
+    mappings: TargetLink[]
+    outputs: OutputColumn[]
 }
 
 type LineageResponse = {
+    synced: boolean
     sourceFile: string
-    syntheticOnly: boolean
-    lineageScope: string
-    summary: { tables: number; fields: number; foreignKeys: number; mappedElements: number; cdes: number }
-    tables: LineageTable[]
+    sourceHash?: string
+    syncedAt?: string
+    summary?: { queries: number; outputColumns: number; mappedOutputs: number; cdes: number }
+    queries: SqlQuery[]
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
 
 export default function SqlLineage() {
     const [lineage, setLineage] = useState<LineageResponse | null>(null)
-    const [selectedTableName, setSelectedTableName] = useState('')
-    const [selectedFieldName, setSelectedFieldName] = useState('')
+    const [selectedQueryId, setSelectedQueryId] = useState('')
+    const [selectedOutputRef, setSelectedOutputRef] = useState('')
     const [error, setError] = useState('')
+    const [syncing, setSyncing] = useState(false)
+
+    async function loadLineage() {
+        const response = await fetch(`${API_BASE}/sql-lineage`)
+        if (!response.ok) throw new Error(await response.text())
+        const result = await response.json() as LineageResponse
+        setLineage(result)
+        if (!selectedQueryId && result.queries[0]) setSelectedQueryId(result.queries[0].queryId)
+    }
 
     useEffect(() => {
-        fetch(`${API_BASE}/sql-lineage`)
-            .then(async (response) => {
-                if (!response.ok) throw new Error(await response.text())
-                return await response.json() as LineageResponse
-            })
-            .then((response) => {
-                setLineage(response)
-                setSelectedTableName(response.tables[0]?.name ?? '')
-                setSelectedFieldName(response.tables[0]?.fields[0]?.name ?? '')
-            })
-            .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+        void loadLineage().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
     }, [])
 
-    const selectedTable = useMemo(
-        () => lineage?.tables.find((table) => table.name === selectedTableName),
-        [lineage, selectedTableName],
+    const selectedQuery = useMemo(
+        () => lineage?.queries.find((query) => query.queryId === selectedQueryId),
+        [lineage, selectedQueryId],
     )
-    const selectedField = selectedTable?.fields.find((field) => field.name === selectedFieldName)
+    const selectedOutput = selectedQuery?.outputs.find((output) => output.sourceRef === selectedOutputRef)
 
-    function selectField(tableName: string, fieldName: string) {
-        setSelectedTableName(tableName)
-        setSelectedFieldName(fieldName)
+    useEffect(() => {
+        if (selectedQuery && !selectedQuery.outputs.some((output) => output.sourceRef === selectedOutputRef)) {
+            setSelectedOutputRef(selectedQuery.outputs[0]?.sourceRef ?? '')
+        }
+    }, [selectedQuery, selectedOutputRef])
+
+    async function syncLineage() {
+        setSyncing(true)
+        setError('')
+        try {
+            const response = await fetch(`${API_BASE}/sql-lineage/sync`, { method: 'POST' })
+            if (!response.ok) throw new Error(await response.text())
+            await loadLineage()
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause))
+        } finally {
+            setSyncing(false)
+        }
+    }
+
+    function targetLabel(mapping: TargetLink) {
+        return mapping.term.name
     }
 
     return (
@@ -94,157 +119,139 @@ export default function SqlLineage() {
             <header className="sql-lineage-heading">
                 <div>
                     <h1>SQL Lineage</h1>
-                    <p>Read legacy table and column dependencies alongside saved graph mappings and CDEs.</p>
+                    <p>Follow SQL result columns from legacy inputs into the current loan graph vocabulary.</p>
                 </div>
-                <span>{lineage?.sourceFile ?? 'Loading legacy SQL…'}</span>
+                <button className="lineage-sync-button" onClick={() => void syncLineage()} disabled={syncing}>
+                    {syncing ? 'Syncing…' : lineage?.synced ? 'Sync SQL to Neo4j' : 'Build lineage in Neo4j'}
+                </button>
             </header>
 
-            {lineage && (
-                <>
-                    <div className="sql-lineage-scope">
-                        {lineage.syntheticOnly && <strong>Synthetic demo data.</strong>} {lineage.lineageScope} SQL is parsed as source text and is never executed.
-                    </div>
-                    <div className="sql-lineage-stats">
-                        <div><strong>{lineage.summary.tables}</strong><span>Tables</span></div>
-                        <div><strong>{lineage.summary.fields}</strong><span>Columns</span></div>
-                        <div><strong>{lineage.summary.foreignKeys}</strong><span>Foreign keys</span></div>
-                        <div><strong>{lineage.summary.mappedElements}</strong><span>Saved mappings</span></div>
-                        <div><strong>{lineage.summary.cdes}</strong><span>CDEs</span></div>
-                    </div>
-                </>
-            )}
-
+            <div className="sql-lineage-scope">
+                Source: <strong>{lineage?.sourceFile ?? 'fibo/sql/sql.sql'}</strong>. Output expressions, input columns, joins, filters, graph terms, and mapping/CDE status are connected in Neo4j. Mapping decisions remain in PostgreSQL.
+            </div>
             {error && <pre className="sql-lineage-error">{error}</pre>}
 
-            {lineage && selectedTable && (
-                <div className="sql-lineage-workspace">
-                    <aside className="sql-lineage-table-list">
-                        <h2>Legacy tables</h2>
-                        {lineage.tables.map((table) => (
-                            <button
-                                key={table.name}
-                                className={selectedTableName === table.name ? 'lineage-table-option selected' : 'lineage-table-option'}
-                                onClick={() => selectField(table.name, table.fields[0]?.name ?? '')}
-                            >
-                                <strong>{table.name}</strong>
-                                <span>{table.fields.length} columns{table.mapping ? ' · mapped' : ''}</span>
-                            </button>
-                        ))}
-                    </aside>
+            {!lineage?.synced ? (
+                <div className="lineage-empty-state">
+                    <h2>Lineage has not been built in Neo4j</h2>
+                    <p>Build it from the six SELECT statements in sql.sql. This creates query, output-column, source-column, and graph-term links in the existing Aura database.</p>
+                    <button onClick={() => void syncLineage()} disabled={syncing}>{syncing ? 'Building…' : 'Build graph lineage'}</button>
+                </div>
+            ) : (
+                <>
+                    <div className="sql-lineage-stats">
+                        <div><strong>{lineage.summary?.queries ?? 0}</strong><span>SQL queries</span></div>
+                        <div><strong>{lineage.summary?.outputColumns ?? 0}</strong><span>Output columns</span></div>
+                        <div><strong>{lineage.summary?.mappedOutputs ?? 0}</strong><span>Linked to graph terms</span></div>
+                        <div><strong>{lineage.summary?.cdes ?? 0}</strong><span>CDEs</span></div>
+                    </div>
+                    <div className="lineage-sync-metadata">Persisted in Neo4j · source SHA-256 {lineage.sourceHash?.slice(0, 16)}… · synced {lineage.syncedAt}</div>
 
-                    <section className="sql-lineage-columns">
-                        <div className="lineage-section-heading">
-                            <div>
-                                <span>Table · SQL line {selectedTable.sourceLine}</span>
-                                <h2>{selectedTable.name}</h2>
-                                <p>{selectedTable.description}</p>
-                            </div>
-                            {selectedTable.mapping && <span className="lineage-mapping-chip">{selectedTable.mapping.fibo_label}</span>}
-                        </div>
-
-                        <div className="lineage-column-list">
-                            {selectedTable.fields.map((field) => (
+                    <div className="sql-lineage-workspace">
+                        <aside className="sql-lineage-table-list">
+                            <h2>SQL statements</h2>
+                            {lineage.queries.map((query) => (
                                 <button
-                                    key={field.name}
-                                    className={selectedFieldName === field.name ? 'lineage-column selected' : 'lineage-column'}
-                                    onClick={() => setSelectedFieldName(field.name)}
+                                    key={query.queryId}
+                                    className={selectedQueryId === query.queryId ? 'lineage-table-option selected' : 'lineage-table-option'}
+                                    onClick={() => setSelectedQueryId(query.queryId)}
                                 >
-                                    <span className="lineage-column-name"><strong>{field.name}</strong><small>{field.dataType}</small></span>
-                                    <span className="lineage-column-tags">
-                                        {field.primaryKey && <i>PK</i>}
-                                        {field.foreignKey && <i>FK</i>}
-                                        {field.mapping && <b>{field.mapping.fibo_label}</b>}
-                                        {field.mapping?.is_cde && <em>CDE</em>}
-                                    </span>
+                                    <strong>{query.name}</strong>
+                                    <span>{query.outputs.length} outputs · lines {query.lineStart}+</span>
+                                    {query.mappings.map((mapping) => <span key={mapping.term.termKey} className="lineage-sidebar-target">→ {targetLabel(mapping)}</span>)}
                                 </button>
                             ))}
-                        </div>
+                        </aside>
 
-                        <div className="lineage-dependencies">
-                            <h3>Table dependencies</h3>
-                            {selectedTable.relationships.length === 0 && selectedTable.incomingRelationships.length === 0
-                                ? <p>No declared foreign-key dependencies.</p>
-                                : <ul>
-                                    {selectedTable.relationships.map((relationship) => (
-                                        <li key={`${relationship.field}:${relationship.table}`}>
-                                            <span>Outgoing</span>
-                                            <button onClick={() => selectField(relationship.table, relationship.targetField)}>
-                                                {selectedTable.name}.{relationship.field} → {relationship.table}.{relationship.targetField}
-                                            </button>
-                                            {selectedTable.fields.find((field) => field.name === relationship.field)?.relationshipMapping && (
-                                                <b>{selectedTable.fields.find((field) => field.name === relationship.field)?.relationshipMapping?.fibo_label}</b>
-                                            )}
-                                        </li>
-                                    ))}
-                                    {selectedTable.incomingRelationships.map((relationship) => (
-                                        <li key={`${relationship.sourceTable}:${relationship.sourceField}`}>
-                                            <span>Incoming</span>
-                                            <button onClick={() => selectField(relationship.sourceTable, relationship.sourceField)}>
-                                                {relationship.sourceTable}.{relationship.sourceField} → {selectedTable.name}.{relationship.targetField}
-                                            </button>
-                                            {relationship.mapping && <b>{relationship.mapping.fibo_label}</b>}
-                                        </li>
-                                    ))}
-                                </ul>}
-                        </div>
-                    </section>
-
-                    <aside className="sql-lineage-detail">
-                        {!selectedField ? <p>Select a column to inspect its lineage.</p> : (
+                        {selectedQuery && (
                             <>
-                                <span>Column · SQL line {selectedField.sourceLine}</span>
-                                <h2>{selectedTable.name}.{selectedField.name}</h2>
-                                <p className="lineage-type">{selectedField.dataType}{selectedField.nullable ? ' · nullable' : ' · required'}{selectedField.primaryKey ? ' · primary key' : ''}</p>
-
-                                {selectedField.semanticExample && <div className="lineage-detail-block"><strong>Data dictionary meaning</strong><p>{selectedField.semanticExample}</p></div>}
-                                {selectedField.sqlComment && <div className="lineage-detail-block"><strong>SQL comment</strong><p>{selectedField.sqlComment}</p></div>}
-                                <div className="lineage-detail-block">
-                                    <strong>Declared source</strong>
-                                    <p>{lineage.sourceFile} · line {selectedField.sourceLine}</p>
-                                </div>
-
-                                {selectedField.foreignKey && (
-                                    <div className="lineage-detail-block">
-                                        <strong>Foreign-key dependency</strong>
-                                        <button className="lineage-jump" onClick={() => selectField(selectedField.foreignKey!.table, selectedField.foreignKey!.field)}>
-                                            {selectedTable.name}.{selectedField.name} → {selectedField.foreignKey.table}.{selectedField.foreignKey.field}
-                                        </button>
-                                        {selectedField.relationshipMapping && <p>Graph relationship: <b>{selectedField.relationshipMapping.fibo_label}</b> · {selectedField.relationshipMapping.review_status}</p>}
+                                <section className="sql-lineage-columns">
+                                    <div className="lineage-section-heading">
+                                        <div>
+                                            <span>Query {selectedQuery.queryNumber} · line {selectedQuery.lineStart}</span>
+                                            <h2>{selectedQuery.name}</h2>
+                                            <p>Reads from: {selectedQuery.tables.join(', ')}</p>
+                                        </div>
+                                        {selectedQuery.mappings.map((mapping) => <span key={mapping.term.termKey} className="lineage-mapping-chip">{mapping.term.name}</span>)}
                                     </div>
-                                )}
 
-                                <div className="lineage-detail-block">
-                                    <strong>Ontology mapping</strong>
-                                    {selectedField.mapping
-                                        ? <>
-                                            <p>{selectedField.mapping.fibo_target_kind}: <b>{selectedField.mapping.fibo_label}</b></p>
-                                            <p className="lineage-status">{selectedField.mapping.review_status}</p>
-                                            {selectedField.mapping.rationale && <p>{selectedField.mapping.rationale}</p>}
-                                        </>
-                                        : <p>No saved mapping for this column.</p>}
-                                </div>
-
-                                {selectedField.mapping?.is_cde && (
-                                    <div className="lineage-cde">
-                                        <strong>Critical Data Element</strong>
-                                        <p>{selectedField.mapping.cde_definition}</p>
-                                    </div>
-                                )}
-
-                                {selectedTable.incomingRelationships.filter((item) => item.targetField === selectedField.name).length > 0 && (
-                                    <div className="lineage-detail-block">
-                                        <strong>Referenced by</strong>
-                                        {selectedTable.incomingRelationships.filter((item) => item.targetField === selectedField.name).map((item) => (
-                                            <button className="lineage-jump" key={`${item.sourceTable}:${item.sourceField}`} onClick={() => selectField(item.sourceTable, item.sourceField)}>
-                                                {item.sourceTable}.{item.sourceField}
+                                    <div className="lineage-column-list">
+                                        {selectedQuery.outputs.map((output) => (
+                                            <button
+                                                key={output.sourceRef}
+                                                className={selectedOutputRef === output.sourceRef ? 'lineage-column selected' : 'lineage-column'}
+                                                onClick={() => setSelectedOutputRef(output.sourceRef)}
+                                            >
+                                                <span className="lineage-column-name"><strong>{output.name}</strong><small>{output.expressionKind}</small></span>
+                                                <span className="lineage-column-tags">
+                                                    {output.mappings.map((mapping) => <b key={mapping.term.termKey}>{mapping.term.name}</b>)}
+                                                    {output.isCde && <em>CDE</em>}
+                                                </span>
                                             </button>
                                         ))}
                                     </div>
-                                )}
+
+                                    {selectedOutput && (
+                                        <div className="lineage-expression">
+                                            <h3>SQL expression</h3>
+                                            <code>{selectedOutput.sqlExpression}</code>
+                                            <span>Derived from {selectedOutput.sourceColumns.map((column) => `${column.tableName}.${column.columnName}`).join(', ') || 'no source column identified'}</span>
+                                        </div>
+                                    )}
+                                    <div className="lineage-expression">
+                                        <h3>Query clauses</h3>
+                                        {selectedQuery.clauses.map((clause, index) => (
+                                            <div className="lineage-clause" key={`${clause.clauseKind}:${index}`}>
+                                                <strong>{clause.clauseKind}</strong>
+                                                <code>{clause.sqlExpression}</code>
+                                                <span>Columns: {clause.sourceColumns.map((column) => `${column.tableName}.${column.columnName}`).join(', ') || 'none identified'}</span>
+                                                {clause.mappings.map((mapping) => <span key={mapping.term.termKey}>Graph relationship: {mapping.term.name} · {mapping.relationshipType === 'MAPS_TO' ? 'reviewed link' : 'draft proposal'}</span>)}
+                                                {clause.mappingRationale && <span>{clause.mappingRationale}</span>}
+                                            </div>
+                                        ))}
+                                        {selectedQuery.clauses.length === 0 && <span>No JOIN, WHERE, or GROUP BY clauses detected.</span>}
+                                    </div>
+                                </section>
+
+                                <aside className="sql-lineage-detail">
+                                    {!selectedOutput ? <p>Select an output column.</p> : (
+                                        <>
+                                            <span>{selectedOutput.expressionKind} output · position {selectedOutput.position}</span>
+                                            <h2>{selectedQuery.queryId}.{selectedOutput.name}</h2>
+                                            <div className="lineage-detail-block">
+                                                <strong>Input lineage</strong>
+                                                {selectedOutput.sourceColumns.length
+                                                    ? selectedOutput.sourceColumns.map((column) => <p key={column.sourceRef}>{column.tableName}.{column.columnName}</p>)
+                                                    : <p>No column references identified in this expression.</p>}
+                                            </div>
+                                            <div className="lineage-detail-block">
+                                                <strong>Current graph link</strong>
+                                                {selectedOutput.mappings.length
+                                                    ? selectedOutput.mappings.map((mapping) => (
+                                                        <p key={mapping.term.termKey}>
+                                                            <b>{mapping.term.name}</b> · {mapping.relationshipType === 'MAPS_TO' ? 'reviewed link' : 'draft proposal'}
+                                                        </p>
+                                                    ))
+                                                    : <p>No saved mapping connects this output to a graph term yet.</p>}
+                                                {selectedOutput.mappingRationale && <p>{selectedOutput.mappingRationale}</p>}
+                                            </div>
+                                            {selectedOutput.isCde && (
+                                                <div className="lineage-cde">
+                                                    <strong>Critical Data Element</strong>
+                                                    <p>{selectedOutput.cdeDefinition || 'CDE; no definition supplied.'}</p>
+                                                </div>
+                                            )}
+                                            <details className="lineage-sql-source">
+                                                <summary>View full SQL statement</summary>
+                                                <pre>{selectedQuery.sqlStatement}</pre>
+                                            </details>
+                                        </>
+                                    )}
+                                </aside>
                             </>
                         )}
-                    </aside>
-                </div>
+                    </div>
+                </>
             )}
         </div>
     )

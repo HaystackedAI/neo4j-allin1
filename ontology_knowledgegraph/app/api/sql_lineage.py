@@ -1,149 +1,438 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import re
+import os
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter
-from sqlalchemy import text
+from fastapi import APIRouter, HTTPException
+from sqlalchemy import create_engine, text
 
-from .legacy_fibo_mapping import engine
+from .neo4j.api_loan import neo4jconn
+from app.sql_lineage_parser import PROJECT_ROOT, load_sql_lineage
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LEGACY_DIR = PROJECT_ROOT / "fibo" / "legacy"
 sqlLineageRouter = APIRouter(prefix="/sql-lineage", tags=["SQL Lineage"])
+MODEL_PATH = PROJECT_ROOT / "fibo" / "loan" / "neo4j_importer_model.json"
+
+database_url = os.getenv("PG_URL") or os.getenv("DATABASE_URL")
+if not database_url:
+    from app.config import get_settings_singleton
+    database_url = get_settings_singleton().TOO_SB_DB
+if database_url.startswith("postgresql+asyncpg://"):
+    database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+pg_engine = create_engine(database_url, pool_pre_ping=True)
+SOURCE_KEY = "fibo/sql/sql.sql"
 
 
-def _parse_legacy_schema() -> list[dict[str, object]]:
-    sql = (LEGACY_DIR / "legacy_loan_demo.sql").read_text(encoding="utf-8")
-    dictionary = json.loads((LEGACY_DIR / "data_dictionary.json").read_text(encoding="utf-8"))
-    descriptions: dict[str, str] = dictionary.get("tables", {})
-    examples = {
-        (table.upper(), field.upper()): meaning
-        for table, field, meaning in dictionary.get("mapping_examples", [])
-    }
-    tables: list[dict[str, object]] = []
+def _term_catalog() -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
+    model = json.loads(MODEL_PATH.read_text(encoding="utf-8"))
+    data_model = model["dataModel"]
+    schema = data_model["graphSchemaRepresentation"]["graphSchema"]
+    labels = {item["$id"]: item["token"] for item in schema["nodeLabels"]}
+    node_types = {item["$id"]: item for item in schema["nodeObjectTypes"]}
+    relationship_types = {item["$id"]: item for item in schema["relationshipTypes"]}
 
-    for table_match in re.finditer(
-        r"CREATE\s+TABLE\s+(\w+)\s*\((.*?)\);", sql, flags=re.IGNORECASE | re.DOTALL
-    ):
-        table_name, body = table_match.groups()
-        table_name = table_name.upper()
-        body_start = table_match.start(2)
-        primary_keys: set[str] = set()
-        for match in re.finditer(r"PRIMARY\s+KEY\s*\(([^)]+)\)", body, flags=re.IGNORECASE):
-            primary_keys.update(part.strip().strip('"').upper() for part in match.group(1).split(","))
-
-        fields: list[dict[str, object]] = []
-        relationships: list[dict[str, str]] = []
-        for line_match in re.finditer(r"[^\r\n]+", body):
-            raw_line = line_match.group(0)
-            column_definition, _, comment = raw_line.partition("--")
-            column_definition = column_definition.strip().rstrip(",").strip()
-            column_match = re.match(r"([A-Za-z_]\w*)\s+(.+)$", column_definition)
-            if not column_match:
-                continue
-            field_name, definition = column_match.groups()
-            field_name = field_name.upper()
-            if field_name in {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}:
-                continue
-
-            data_type = definition.split()[0].upper()
-            is_primary_key = field_name in primary_keys or bool(re.search(r"\bPRIMARY\s+KEY\b", definition, re.IGNORECASE))
-            reference = re.search(
-                r"\bREFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)", definition, re.IGNORECASE
-            )
-            foreign_key = None
-            if reference:
-                target_table, target_field = (part.upper() for part in reference.groups())
-                foreign_key = {"table": target_table, "field": target_field}
-                relationships.append({"field": field_name, "table": target_table, "targetField": target_field})
-
-            fields.append({
-                "name": field_name,
-                "dataType": data_type,
-                "nullable": not is_primary_key and not bool(re.search(r"\bNOT\s+NULL\b", definition, re.IGNORECASE)),
-                "primaryKey": is_primary_key,
-                "foreignKey": foreign_key,
-                "sqlComment": comment.strip() or None,
-                "semanticExample": examples.get((table_name, field_name)),
-                "sourceLine": sql.count("\n", 0, body_start + line_match.start()) + 1,
-                "sourceRef": f"field|{table_name}|{field_name}",
+    terms: list[dict[str, Any]] = []
+    property_links: list[dict[str, str]] = []
+    for node_label in schema["nodeLabels"]:
+        class_name = node_label["token"]
+        terms.append({
+            "termKey": f"class:{class_name}",
+            "termKind": "class",
+            "name": class_name,
+            "description": node_label.get("description", ""),
+        })
+        for prop in node_label.get("properties", []):
+            property_name = f"{class_name}.{prop['token']}"
+            terms.append({
+                "termKey": f"property:{property_name}",
+                "termKind": "property",
+                "name": property_name,
+                "domain": class_name,
+                "description": prop.get("description", ""),
             })
+            property_links.append({"class": class_name, "property": property_name})
 
-        tables.append({
-            "name": table_name,
-            "description": descriptions.get(table_name, "Legacy source table."),
-            "sourceLine": sql.count("\n", 0, table_match.start()) + 1,
-            "sourceRef": f"entity|{table_name}",
-            "fields": fields,
-            "relationships": relationships,
+    relationship_links: list[dict[str, str]] = []
+    for relationship in schema["relationshipTypes"]:
+        name = relationship["token"]
+        terms.append({
+            "termKey": f"relationship:{name}",
+            "termKind": "relationship",
+            "name": name,
+            "description": relationship.get("description", ""),
         })
 
-    return tables
+    for relationship_object in schema["relationshipObjectTypes"]:
+        relationship_id = relationship_object["type"]["$ref"].removeprefix("#")
+        relationship_name = relationship_types[relationship_id]["token"]
+        from_type = node_types[relationship_object["from"]["$ref"].removeprefix("#")]
+        to_type = node_types[relationship_object["to"]["$ref"].removeprefix("#")]
+        from_label = labels[from_type["labels"][0]["$ref"].removeprefix("#")]
+        to_label = labels[to_type["labels"][0]["$ref"].removeprefix("#")]
+        relationship_links.append({
+            "fromClass": from_label,
+            "relationship": relationship_name,
+            "toClass": to_label,
+        })
+    return terms, property_links, relationship_links
+
+
+def _source_and_graph_payload() -> tuple[str, str, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    file_name, sql, queries = load_sql_lineage()
+    source_hash = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    input_fields: dict[str, dict[str, str]] = {}
+    tables: set[str] = set()
+    for query in queries:
+        for column in query["referencedColumns"]:
+            input_fields[column["sourceRef"]] = column
+            tables.add(column["table"])
+    return file_name, sql, source_hash, queries, list(input_fields.values()), [{"name": table} for table in sorted(tables)]
+
+
+def _mapping_target_key(mapping: dict[str, Any]) -> str:
+    kind = mapping["fibo_target_kind"]
+    label = mapping["fibo_label"]
+    return f"{kind}:{label}"
+
+
+def _mapping_rows() -> list[dict[str, Any]]:
+    with pg_engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT id, source_ref, source_kind, fibo_target_kind, fibo_label, rationale, "
+            "is_cde, cde_definition, review_status FROM legacy_fibo_mappings"
+        )).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _ensure_graph_constraints() -> None:
+    neo4jconn.run(
+        "CREATE CONSTRAINT legacy_sql_source_key IF NOT EXISTS "
+        "FOR (source:LegacySqlSource) REQUIRE source.sourceKey IS UNIQUE"
+    )
+    neo4jconn.run(
+        "CREATE CONSTRAINT legacy_sql_element_key IF NOT EXISTS "
+        "FOR (element:LegacySqlElement) REQUIRE (element.sourceKey, element.sourceRef) IS UNIQUE"
+    )
+    neo4jconn.run(
+        "CREATE CONSTRAINT ontology_term_key IF NOT EXISTS "
+        "FOR (term:OntologyTerm) REQUIRE term.termKey IS UNIQUE"
+    )
+
+
+def _sync_to_graph() -> dict[str, Any]:
+    file_name, sql, source_hash, queries, input_fields, source_tables = _source_and_graph_payload()
+    mappings = _mapping_rows()
+    terms, property_links, relationship_links = _term_catalog()
+    term_keys = {term["termKey"] for term in terms}
+
+    query_refs = {query["sourceRef"] for query in queries}
+    output_refs = {
+        output["sourceRef"] for query in queries for output in query["outputs"]
+    }
+    clause_refs = {
+        clause["sourceRef"] for query in queries for clause in query["clauses"]
+        if clause["clauseKind"] == "join"
+    }
+    source_refs = query_refs | output_refs | clause_refs | {field["sourceRef"] for field in input_fields}
+    valid_mappings: list[dict[str, Any]] = []
+    unresolved: list[dict[str, str]] = []
+    for mapping in mappings:
+        target_key = _mapping_target_key(mapping)
+        if mapping["source_ref"] not in source_refs:
+            unresolved.append({"sourceRef": mapping["source_ref"], "reason": "Source is not present in sql.sql"})
+        elif target_key not in term_keys:
+            unresolved.append({"sourceRef": mapping["source_ref"], "reason": f"Unknown graph target {target_key}"})
+        else:
+            valid_mappings.append(mapping)
+
+    mapping_by_ref = {mapping["source_ref"]: mapping for mapping in valid_mappings}
+    rows: list[dict[str, Any]] = []
+    edges: dict[str, list[dict[str, str]]] = {
+        "HAS_QUERY": [], "RETURNS": [], "BELONGS_TO": [], "DERIVES_FROM": [], "READS_FROM": [],
+        "HAS_CLAUSE": [], "REFERENCES_COLUMN": [],
+    }
+
+    for table in source_tables:
+        table_name = table["name"]
+        rows.append({
+            "sourceRef": f"table|{table_name}", "elementKind": "input_table", "name": table_name,
+            "tableName": table_name, "active": True,
+        })
+    for field in input_fields:
+        rows.append({
+            "sourceRef": field["sourceRef"], "elementKind": "input_column",
+            "name": f"{field['table']}.{field['field']}", "tableName": field["table"],
+            "columnName": field["field"], "active": True,
+        })
+        edges["BELONGS_TO"].append({"fromRef": field["sourceRef"], "toRef": f"table|{field['table']}"})
+
+    for query in queries:
+        query_id = query["queryId"]
+        query_mapping = mapping_by_ref.get(query["sourceRef"])
+        rows.append({
+            "sourceRef": query["sourceRef"], "elementKind": "query", "name": query["name"],
+            "queryId": query_id, "queryNumber": query["queryNumber"], "lineStart": query["lineStart"],
+            "sqlStatement": query["statement"], "tables": query["tables"], "sourceHash": source_hash,
+            "clauseCount": len(query["clauses"]),
+            "active": True, "fiboLabel": query_mapping["fibo_label"] if query_mapping else None,
+            "fiboTargetKind": query_mapping["fibo_target_kind"] if query_mapping else None,
+            "reviewStatus": query_mapping["review_status"] if query_mapping else None,
+        })
+        edges["HAS_QUERY"].append({"fromRef": "source|sql", "toRef": query["sourceRef"]})
+        for clause in query["clauses"]:
+            clause_mapping = mapping_by_ref.get(clause["sourceRef"])
+            rows.append({
+                "sourceRef": clause["sourceRef"], "elementKind": "sql_clause",
+                "name": clause["clauseKind"].capitalize(), "queryId": query_id,
+                "clauseKind": clause["clauseKind"], "sqlExpression": clause["expression"],
+                "fiboLabel": clause_mapping["fibo_label"] if clause_mapping else None,
+                "fiboTargetKind": clause_mapping["fibo_target_kind"] if clause_mapping else None,
+                "reviewStatus": clause_mapping["review_status"] if clause_mapping else None,
+                "mappingRationale": clause_mapping["rationale"] if clause_mapping else None,
+                "active": True,
+            })
+            edges["HAS_CLAUSE"].append({"fromRef": query["sourceRef"], "toRef": clause["sourceRef"]})
+            for source in clause["sourceColumns"]:
+                edges["REFERENCES_COLUMN"].append({"fromRef": clause["sourceRef"], "toRef": source["sourceRef"]})
+        for output in query["outputs"]:
+            output_mapping = mapping_by_ref.get(output["sourceRef"])
+            rows.append({
+                "sourceRef": output["sourceRef"], "elementKind": "output_column",
+                "name": output["name"], "queryId": query_id, "position": output["position"],
+                "sqlExpression": output["sqlExpression"], "expressionKind": output["expressionKind"],
+                "sourceHash": source_hash, "active": True,
+                "fiboLabel": output_mapping["fibo_label"] if output_mapping else None,
+                "fiboTargetKind": output_mapping["fibo_target_kind"] if output_mapping else None,
+                "reviewStatus": output_mapping["review_status"] if output_mapping else None,
+                "isCde": bool(output_mapping["is_cde"]) if output_mapping else False,
+                "cdeDefinition": output_mapping["cde_definition"] if output_mapping else None,
+                "mappingRationale": output_mapping["rationale"] if output_mapping else None,
+            })
+            edges["RETURNS"].append({"fromRef": query["sourceRef"], "toRef": output["sourceRef"]})
+            for source in output["sourceColumns"]:
+                edges["DERIVES_FROM"].append({"fromRef": output["sourceRef"], "toRef": source["sourceRef"]})
+            for source in query["referencedColumns"]:
+                edges["READS_FROM"].append({"fromRef": query["sourceRef"], "toRef": source["sourceRef"]})
+
+    ontology_terms, property_links, relationship_links = _term_catalog()
+    statements: list[tuple[str, dict[str, Any]]] = [
+        (
+            "MATCH (n:LegacySqlElement {sourceKey:$sourceKey}) SET n.active=false",
+            {"sourceKey": SOURCE_KEY},
+        ),
+        (
+            "MERGE (source:LegacySqlSource {sourceKey:$sourceKey}) "
+            "SET source.fileName=$fileName, source.sha256=$sourceHash, source.sqlText=$sqlText, "
+            "source.syncedAt=$syncedAt, source.active=true",
+            {
+                "sourceKey": SOURCE_KEY, "fileName": file_name, "sourceHash": source_hash,
+                "sqlText": sql,
+                "syncedAt": datetime.now(timezone.utc).isoformat(),
+            },
+        ),
+        (
+            "UNWIND $rows AS row MERGE (n:LegacySqlElement {sourceKey:$sourceKey, sourceRef:row.sourceRef}) "
+            "SET n += row",
+            {"sourceKey": SOURCE_KEY, "rows": rows},
+        ),
+        (
+            "UNWIND $terms AS row MERGE (term:OntologyTerm {termKey:row.termKey}) SET term += row",
+            {"terms": ontology_terms},
+        ),
+    ]
+    for relationship_type in (
+        "HAS_QUERY", "RETURNS", "BELONGS_TO", "DERIVES_FROM", "READS_FROM",
+        "HAS_CLAUSE", "REFERENCES_COLUMN", "MAPS_TO", "PROPOSES_MAPPING_TO",
+    ):
+        statements.append((
+            f"MATCH ()-[r:{relationship_type} {{sourceKey:$sourceKey}}]->() DELETE r",
+            {"sourceKey": SOURCE_KEY},
+        ))
+
+    edge_queries = {
+        "HAS_QUERY": "MATCH (source:LegacySqlSource {sourceKey:$sourceKey}) MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (source)-[r:HAS_QUERY {sourceKey:$sourceKey}]->(b)",
+        "RETURNS": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:RETURNS {sourceKey:$sourceKey}]->(b)",
+        "BELONGS_TO": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:BELONGS_TO {sourceKey:$sourceKey}]->(b)",
+        "DERIVES_FROM": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:DERIVES_FROM {sourceKey:$sourceKey}]->(b)",
+        "READS_FROM": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:READS_FROM {sourceKey:$sourceKey}]->(b)",
+        "HAS_CLAUSE": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:HAS_CLAUSE {sourceKey:$sourceKey}]->(b)",
+        "REFERENCES_COLUMN": "MATCH (a:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.fromRef}) MATCH (b:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) MERGE (a)-[r:REFERENCES_COLUMN {sourceKey:$sourceKey}]->(b)",
+    }
+    for edge_type, edge_rows in edges.items():
+        if edge_type == "HAS_QUERY":
+            statement = (
+                "UNWIND $edges AS edge MATCH (source:LegacySqlSource {sourceKey:$sourceKey}) "
+                "MATCH (query:LegacySqlElement {sourceKey:$sourceKey,sourceRef:edge.toRef}) "
+                "MERGE (source)-[r:HAS_QUERY {sourceKey:$sourceKey}]->(query)"
+            )
+        else:
+            statement = f"UNWIND $edges AS edge {edge_queries[edge_type]}"
+        statements.append((statement, {"sourceKey": SOURCE_KEY, "edges": edge_rows}))
+
+    reviewed_mappings = []
+    proposed_mappings = []
+    for mapping in valid_mappings:
+        graph_mapping = {
+            "sourceRef": mapping["source_ref"],
+            "termKey": _mapping_target_key(mapping),
+            "reviewStatus": mapping["review_status"],
+            "rationale": mapping["rationale"],
+            "mappingId": mapping["id"],
+        }
+        (reviewed_mappings if mapping["review_status"] == "reviewed" else proposed_mappings).append(graph_mapping)
+    for relationship_type, mapping_rows in (("MAPS_TO", reviewed_mappings), ("PROPOSES_MAPPING_TO", proposed_mappings)):
+        statements.append((
+            "UNWIND $mappings AS mapping "
+            "MATCH (source:LegacySqlElement {sourceKey:$sourceKey,sourceRef:mapping.sourceRef}) "
+            "MATCH (term:OntologyTerm {termKey:mapping.termKey}) "
+            f"MERGE (source)-[r:{relationship_type} {{sourceKey:$sourceKey}}]->(term) "
+            "SET r += mapping",
+            {"sourceKey": SOURCE_KEY, "mappings": mapping_rows},
+        ))
+
+    statements.append((
+        "UNWIND $links AS link "
+        "MATCH (class:OntologyTerm {termKey:link.classKey}) "
+        "MATCH (prop:OntologyTerm {termKey:link.propertyKey}) "
+        "MERGE (class)-[:HAS_PROPERTY {schemaKey:'loan-graph-v1'}]->(prop)",
+        {"links": [
+            {"classKey": f"class:{link['class']}", "propertyKey": f"property:{link['property']}"}
+            for link in property_links
+        ]},
+    ))
+    statements.append((
+        "UNWIND $links AS link "
+        "MATCH (from:OntologyTerm {termKey:link.fromKey}) "
+        "MATCH (relationship:OntologyTerm {termKey:link.relationshipKey}) "
+        "MATCH (to:OntologyTerm {termKey:link.toKey}) "
+        "MERGE (from)-[:SOURCE_OF {schemaKey:'loan-graph-v1'}]->(relationship) "
+        "MERGE (relationship)-[:TARGETS {schemaKey:'loan-graph-v1'}]->(to)",
+        {"links": [
+            {
+                "fromKey": f"class:{link['fromClass']}",
+                "relationshipKey": f"relationship:{link['relationship']}",
+                "toKey": f"class:{link['toClass']}",
+            }
+            for link in relationship_links
+        ]},
+    ))
+    class_terms = [
+        {"name": term["name"], "termKey": term["termKey"]}
+        for term in ontology_terms if term["termKind"] == "class"
+    ]
+    property_terms = [
+        {
+            "domain": term["domain"], "propertyName": term["name"].split(".", 1)[1],
+            "termKey": term["termKey"],
+        }
+        for term in ontology_terms if term["termKind"] == "property"
+    ]
+    statements.append((
+        "UNWIND $classes AS classRow MATCH (instance:$(classRow.name)) "
+        "MATCH (term:OntologyTerm {termKey:classRow.termKey}) "
+        "MERGE (instance)-[:INSTANCE_OF {schemaKey:'loan-graph-v1'}]->(term)",
+        {"classes": class_terms},
+    ))
+    statements.append((
+        "UNWIND $properties AS propertyRow MATCH (instance:$(propertyRow.domain)) "
+        "WHERE instance[propertyRow.propertyName] IS NOT NULL "
+        "MATCH (term:OntologyTerm {termKey:propertyRow.termKey}) "
+        "MERGE (instance)-[:HAS_PROPERTY_VALUE {schemaKey:'loan-graph-v1'}]->(term)",
+        {"properties": property_terms},
+    ))
+
+    _ensure_graph_constraints()
+    neo4jconn.run_transaction(statements)
+    return {
+        "sourceFile": f"fibo/sql/{file_name}", "sourceHash": source_hash,
+        "queries": len(queries), "outputColumns": sum(len(query["outputs"]) for query in queries),
+        "inputColumns": len(input_fields), "mappedElements": len(valid_mappings),
+        "unresolvedMappings": unresolved,
+    }
+
+
+@sqlLineageRouter.post("/sync")
+def sync_sql_lineage_to_graph():
+    try:
+        return {"synced": True, **_sync_to_graph()}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not synchronize SQL lineage to Neo4j: {error}") from error
 
 
 @sqlLineageRouter.get("")
 def get_sql_lineage():
-    tables = _parse_legacy_schema()
-    dictionary = json.loads((LEGACY_DIR / "data_dictionary.json").read_text(encoding="utf-8"))
-    with engine.connect() as connection:
-        mapping_rows = connection.execute(text(
-            "SELECT source_ref, fibo_target_kind, fibo_label, rationale, is_cde, "
-            "cde_definition, review_status FROM legacy_fibo_mappings"
-        )).mappings().all()
-
-    mappings = {row["source_ref"]: dict(row) for row in mapping_rows}
-    table_by_name = {table["name"]: table for table in tables}
-    incoming_by_table: dict[str, list[dict[str, str | dict[str, object] | None]]] = {
-        table["name"]: [] for table in tables
-    }
-    field_count = 0
-    relationship_count = 0
-    cde_count = 0
-    known_mapping_refs: set[str] = set()
-
-    for table in tables:
-        table["mapping"] = mappings.get(table["sourceRef"])
-        known_mapping_refs.add(table["sourceRef"])
-        for field in table["fields"]:
-            field_count += 1
-            field["mapping"] = mappings.get(field["sourceRef"])
-            known_mapping_refs.add(field["sourceRef"])
-            if field["mapping"] and field["mapping"]["is_cde"]:
-                cde_count += 1
-            foreign_key = field["foreignKey"]
-            if foreign_key:
-                relationship_count += 1
-                target_table = table_by_name.get(foreign_key["table"])
-                target_desc = target_table["description"] if target_table else ""
-                relationship_ref = (
-                    f"relationship|{table['name']}|{field['name']}|"
-                    f"{foreign_key['table']}|{foreign_key['field']}"
-                )
-                known_mapping_refs.add(relationship_ref)
-                field["relationshipMapping"] = mappings.get(relationship_ref)
-                field["foreignKey"]["sourceRef"] = relationship_ref
-                field["foreignKey"]["targetDescription"] = target_desc
-                incoming_by_table.setdefault(foreign_key["table"], []).append({
-                    "sourceTable": table["name"],
-                    "sourceField": field["name"],
-                    "targetField": foreign_key["field"],
-                    "mapping": field["relationshipMapping"],
-                })
-    for table in tables:
-        table["incomingRelationships"] = incoming_by_table.get(table["name"], [])
+    source_rows = neo4jconn.run(
+        "MATCH (source:LegacySqlSource {sourceKey:$sourceKey,active:true}) "
+        "RETURN properties(source) AS source",
+        {"sourceKey": SOURCE_KEY},
+    )
+    if not source_rows:
+        return {"synced": False, "sourceFile": "fibo/sql/sql.sql", "queries": []}
+    source = source_rows[0]["source"]
+    query_rows = neo4jconn.run(
+        "MATCH (source:LegacySqlSource {sourceKey:$sourceKey})-[:HAS_QUERY]->(query:LegacySqlElement {active:true}) "
+        "OPTIONAL MATCH (query)-[mapping:MAPS_TO|PROPOSES_MAPPING_TO]->(term:OntologyTerm) "
+        "RETURN properties(query) AS query, "
+        "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
+        "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
+        "ORDER BY query.queryNumber",
+        {"sourceKey": SOURCE_KEY},
+    )
+    queries: list[dict[str, Any]] = []
+    for query_row in query_rows:
+        query = query_row["query"]
+        query["mappings"] = [item for item in query_row["mappings"] if item]
+        output_rows = neo4jconn.run(
+            "MATCH (query:LegacySqlElement {sourceKey:$sourceKey,queryId:$queryId,active:true})-[:RETURNS]->"
+            "(output:LegacySqlElement {active:true}) "
+            "OPTIONAL MATCH (output)-[:DERIVES_FROM]->(input:LegacySqlElement {active:true}) "
+            "WITH output, collect(DISTINCT properties(input)) AS inputs "
+            "OPTIONAL MATCH (output)-[mapping:MAPS_TO|PROPOSES_MAPPING_TO]->(term:OntologyTerm) "
+            "RETURN properties(output) AS output, inputs, "
+            "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
+            "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
+            "ORDER BY output.position",
+            {"sourceKey": SOURCE_KEY, "queryId": query["queryId"]},
+        )
+        query["outputs"] = []
+        clause_rows = neo4jconn.run(
+            "MATCH (query:LegacySqlElement {sourceKey:$sourceKey,queryId:$queryId,active:true})-[:HAS_CLAUSE]->"
+            "(clause:LegacySqlElement {active:true}) "
+            "OPTIONAL MATCH (clause)-[:REFERENCES_COLUMN]->(input:LegacySqlElement {active:true}) "
+            "WITH clause, collect(DISTINCT properties(input)) AS sourceColumns "
+            "OPTIONAL MATCH (clause)-[mapping:MAPS_TO|PROPOSES_MAPPING_TO]->(term:OntologyTerm) "
+            "RETURN properties(clause) AS clause, sourceColumns, "
+            "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
+            "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
+            "ORDER BY clause.clauseKind",
+            {"sourceKey": SOURCE_KEY, "queryId": query["queryId"]},
+        )
+        query["clauses"] = []
+        for clause_row in clause_rows:
+            clause = clause_row["clause"]
+            clause["sourceColumns"] = [item for item in clause_row["sourceColumns"] if item]
+            clause["mappings"] = [item for item in clause_row["mappings"] if item]
+            query["clauses"].append(clause)
+        for output_row in output_rows:
+            output = output_row["output"]
+            output["sourceColumns"] = [item for item in output_row["inputs"] if item]
+            output["mappings"] = [item for item in output_row["mappings"] if item]
+            query["outputs"].append(output)
+        queries.append(query)
 
     return {
-        "sourceFile": "fibo/legacy/legacy_loan_demo.sql",
-        "syntheticOnly": bool(dictionary.get("synthetic_only", False)),
-        "lineageScope": "Table, column, and declared foreign-key dependencies from the SQL schema. The script has no transformation queries, so value-level SQL lineage is not available.",
+        "synced": True,
+        "sourceFile": source.get("fileName"),
+        "sourceHash": source.get("sha256"),
+        "syncedAt": source.get("syncedAt"),
         "summary": {
-            "tables": len(tables),
-            "fields": field_count,
-            "foreignKeys": relationship_count,
-            "mappedElements": len(known_mapping_refs.intersection(mappings)),
-            "cdes": cde_count,
+            "queries": len(queries),
+            "outputColumns": sum(len(query["outputs"]) for query in queries),
+            "mappedOutputs": sum(bool(output.get("mappings")) for query in queries for output in query["outputs"]),
+            "cdes": sum(bool(output.get("isCde")) for query in queries for output in query["outputs"]),
         },
-        "tables": tables,
+        "queries": queries,
     }

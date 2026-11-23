@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +9,8 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import create_engine, text
+
+from ..sql_lineage_parser import load_sql_lineage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -56,78 +57,53 @@ def list_fibo_targets():
 
 @legacyFiboRouter.get("/sources")
 def list_legacy_sources():
-    legacy_dir = PROJECT_ROOT / "fibo" / "legacy"
-    sql = (legacy_dir / "legacy_loan_demo.sql").read_text(encoding="utf-8")
-    dictionary = json.loads((legacy_dir / "data_dictionary.json").read_text(encoding="utf-8"))
-    table_descriptions: dict[str, str] = dictionary["tables"]
-    semantic_examples = {
-        (table, field): meaning
-        for table, field, meaning in dictionary.get("mapping_examples", [])
-    }
-
+    source_file, _, queries = load_sql_lineage()
     elements = []
-    table_blocks = re.finditer(
-        r"CREATE\s+TABLE\s+(\w+)\s*\((.*?)\);", sql, flags=re.IGNORECASE | re.DOTALL
-    )
-    for table_match in table_blocks:
-        table_name, body = table_match.groups()
-        table_name = table_name.upper()
-        table_description = table_descriptions.get(table_name, "Legacy source table.")
+    for query in queries:
+        query_id = str(query["queryId"])
         elements.append({
-            "sourceRef": f"entity|{table_name}",
+            "sourceRef": query["sourceRef"],
             "sourceKind": "entity",
-            "sourceTable": table_name,
+            "sourceTable": query_id,
             "sourceField": None,
-            "graphElement": table_name,
-            "description": table_description,
+            "graphElement": str(query["name"]),
+            "description": f"SQL result set from {', '.join(query['tables'])}; {len(query['outputs'])} output columns.",
             "fiboTargetKind": "class",
         })
-
-        for line in body.splitlines():
-            column_definition, _, inline_comment = line.partition("--")
-            column_definition = column_definition.strip().rstrip(",").strip()
-            column = re.match(r"([A-Za-z_]\w*)\s+(.+)$", column_definition)
-            if not column:
+        for clause in query["clauses"]:
+            if clause["clauseKind"] != "join":
                 continue
-            field_name, definition = column.groups()
-            if field_name.upper() in {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}:
-                continue
-            field_name = field_name.upper()
-            data_type = definition.split()[0].upper()
-            meaning = semantic_examples.get((table_name, field_name))
-            details = [f"{table_name}.{field_name} ({data_type})"]
-            if inline_comment:
-                details.append(inline_comment.strip())
-            if meaning:
-                details.append(f"Starter semantic example: {meaning}")
+            source_columns = clause["sourceColumns"]
+            source_names = [f"{column['table']}.{column['field']}" for column in source_columns]
             elements.append({
-                "sourceRef": f"field|{table_name}|{field_name}",
+                "sourceRef": clause["sourceRef"],
+                "sourceKind": "relationship",
+                "sourceTable": query_id,
+                "sourceField": clause["sourceRef"],
+                "graphElement": clause["expression"],
+                "description": f"SQL join between {', '.join(source_names)}.",
+                "fiboTargetKind": "relationship",
+            })
+        for output in query["outputs"]:
+            source_columns = output["sourceColumns"]
+            source_names = [f"{column['table']}.{column['field']}" for column in source_columns]
+            elements.append({
+                "sourceRef": output["sourceRef"],
                 "sourceKind": "field",
-                "sourceTable": table_name,
-                "sourceField": field_name,
-                "graphElement": field_name,
-                "description": " · ".join(details),
+                "sourceTable": query_id,
+                "sourceField": output["name"],
+                "graphElement": output["name"],
+                "description": (
+                    f"{output['expressionKind'].capitalize()} output: {output['sqlExpression']}. "
+                    f"Input columns: {', '.join(source_names) if source_names else 'none identified'}"
+                ),
                 "fiboTargetKind": "property",
-                "semanticExample": meaning,
+                "semanticExample": f"{query['name']} · {output['expressionKind']} result column",
             })
 
-            reference = re.search(r"\bREFERENCES\s+(\w+)\s*\(\s*(\w+)\s*\)", definition, re.IGNORECASE)
-            if reference:
-                target_table, target_field = reference.groups()
-                target_table, target_field = target_table.upper(), target_field.upper()
-                elements.append({
-                    "sourceRef": f"relationship|{table_name}|{field_name}|{target_table}|{target_field}",
-                    "sourceKind": "relationship",
-                    "sourceTable": table_name,
-                    "sourceField": field_name,
-                    "graphElement": f"{table_name}.{field_name} → {target_table}.{target_field}",
-                    "description": f"Foreign-key relationship from {table_name}.{field_name} to {target_table}.{target_field}.",
-                    "fiboTargetKind": "relationship",
-                })
-
     return {
-        "sourceSystem": "Synthetic legacy commercial-loan SQL schema",
-        "sourceFile": "fibo/legacy/legacy_loan_demo.sql",
+        "sourceSystem": "Legacy SQL transformation outputs",
+        "sourceFile": f"fibo/sql/{source_file}",
         "elements": elements,
     }
 
@@ -173,6 +149,26 @@ class MappingInput(BaseModel):
         valid_names = {item["name"] for item in _fibo_vocabulary()[vocabulary_key]}
         if self.fibo_label not in valid_names:
             raise ValueError(f"Choose a {self.fibo_target_kind} label from the current loan graph vocabulary")
+        _, _, queries = load_sql_lineage()
+        valid_sources = {
+            query["sourceRef"]: ("entity", query["queryId"], None)
+            for query in queries
+        }
+        valid_sources.update({
+            output["sourceRef"]: ("field", query["queryId"], output["name"])
+            for query in queries
+            for output in query["outputs"]
+        })
+        valid_sources.update({
+            clause["sourceRef"]: ("relationship", query["queryId"], clause["sourceRef"])
+            for query in queries
+            for clause in query["clauses"]
+            if clause["clauseKind"] == "join"
+        })
+        expected_source = valid_sources.get(self.source_ref)
+        actual_source = (self.source_kind, self.source_table, self.source_field)
+        if expected_source is None or actual_source != expected_source:
+            raise ValueError("Choose a query or output column from the current fibo/sql/sql.sql source")
         if self.is_cde and self.source_kind != "field":
             raise ValueError("CDE designation applies to legacy fields")
         if self.is_cde and not (self.cde_definition or "").strip():

@@ -75,6 +75,9 @@ def ontology_mappings():
     schema = data_model["graphSchemaRepresentation"]["graphSchema"]
     mappings = data_model["graphMappingRepresentation"]
 
+    def resolve_ref(ref: str) -> str:
+        return ref.removeprefix("#")
+
     labels_by_id = {item["$id"]: item for item in schema["nodeLabels"]}
     properties_by_id = {
         prop["$id"]: prop
@@ -89,12 +92,12 @@ def ontology_mappings():
 
     entities = []
     for item in mappings["nodeMappings"]:
-        node_type = node_types_by_id[item["node"]["$ref"]]
+        node_type = node_types_by_id[resolve_ref(item["node"]["$ref"])]
         label_refs = node_type.get("labels", [])
-        label_names = [labels_by_id[ref["$ref"]]["token"] for ref in label_refs]
+        label_names = [labels_by_id[resolve_ref(ref["$ref"])]["token"] for ref in label_refs]
         label = label_names[0] if label_names else "Unknown"
         label_definition = next(
-            (labels_by_id[ref["$ref"]] for ref in label_refs), {}
+            (labels_by_id[resolve_ref(ref["$ref"])] for ref in label_refs), {}
         )
         entities.append({
             "name": label,
@@ -105,8 +108,8 @@ def ontology_mappings():
             "properties": [
                 {
                     "sourceField": prop_mapping["fieldName"],
-                    "graphProperty": properties_by_id[prop_mapping["property"]["$ref"]]["token"],
-                    "description": properties_by_id[prop_mapping["property"]["$ref"]].get("description", ""),
+                    "graphProperty": properties_by_id[resolve_ref(prop_mapping["property"]["$ref"])]["token"],
+                    "description": properties_by_id[resolve_ref(prop_mapping["property"]["$ref"])].get("description", ""),
                 }
                 for prop_mapping in item.get("propertyMappings", [])
             ],
@@ -115,14 +118,14 @@ def ontology_mappings():
 
     relationships = []
     node_label_names_by_type = {
-        node_id: [labels_by_id[ref["$ref"]]["token"] for ref in node_type.get("labels", [])]
+        node_id: [labels_by_id[resolve_ref(ref["$ref"])]["token"] for ref in node_type.get("labels", [])]
         for node_id, node_type in node_types_by_id.items()
     }
     for item in mappings["relationshipMappings"]:
-        relationship_object = relationship_objects_by_id[item["relationship"]["$ref"]]
-        relationship_type = relationship_types_by_id[relationship_object["type"]["$ref"]]
-        from_ref = relationship_object["from"]["$ref"]
-        to_ref = relationship_object["to"]["$ref"]
+        relationship_object = relationship_objects_by_id[resolve_ref(item["relationship"]["$ref"])]
+        relationship_type = relationship_types_by_id[resolve_ref(relationship_object["type"]["$ref"])]
+        from_ref = resolve_ref(relationship_object["from"]["$ref"])
+        to_ref = resolve_ref(relationship_object["to"]["$ref"])
         relationships.append({
             "name": relationship_type["token"],
             "from": node_label_names_by_type.get(from_ref, []),
@@ -133,8 +136,8 @@ def ontology_mappings():
             "properties": [
                 {
                     "sourceField": prop_mapping["fieldName"],
-                    "graphProperty": properties_by_id[prop_mapping["property"]["$ref"]]["token"],
-                    "description": properties_by_id[prop_mapping["property"]["$ref"]].get("description", ""),
+                    "graphProperty": properties_by_id[resolve_ref(prop_mapping["property"]["$ref"])]["token"],
+                    "description": properties_by_id[resolve_ref(prop_mapping["property"]["$ref"])].get("description", ""),
                 }
                 for prop_mapping in item.get("propertyMappings", [])
             ],

@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
 from .neo4j.api_loan import neo4jconn
-from app.sql_lineage_parser import PROJECT_ROOT, load_sql_lineage
+from app.sql_lineage_parser import PROJECT_ROOT, load_sql_lineage, parse_sql_lineage
 
 sqlLineageRouter = APIRouter(prefix="/sql-lineage", tags=["SQL Lineage"])
 MODEL_PATH = PROJECT_ROOT / "fibo" / "loan" / "neo4j_importer_model.json"
@@ -24,6 +25,11 @@ if database_url.startswith("postgresql+asyncpg://"):
     database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
 pg_engine = create_engine(database_url, pool_pre_ping=True)
 SOURCE_KEY = "fibo/sql/sql.sql"
+
+
+class SavedSqlQueryRequest(BaseModel):
+    name: str
+    sql: str
 
 
 def _term_catalog() -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
@@ -80,8 +86,17 @@ def _term_catalog() -> tuple[list[dict[str, Any]], list[dict[str, str]], list[di
     return terms, property_links, relationship_links
 
 
-def _source_and_graph_payload() -> tuple[str, str, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
-    file_name, sql, queries = load_sql_lineage()
+def _source_and_graph_payload(
+    sql: str | None = None,
+    file_name: str | None = None,
+) -> tuple[str, str, str, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
+    if sql is None:
+        file_name, sql, queries = load_sql_lineage()
+    else:
+        file_name = file_name or "saved-query.sql"
+        queries = parse_sql_lineage(sql)
+        if queries:
+            queries[0]["name"] = Path(file_name).stem
     source_hash = hashlib.sha256(sql.encode("utf-8")).hexdigest()
     input_fields: dict[str, dict[str, str]] = {}
     tables: set[str] = set()
@@ -122,9 +137,13 @@ def _ensure_graph_constraints() -> None:
     )
 
 
-def _sync_to_graph() -> dict[str, Any]:
-    file_name, sql, source_hash, queries, input_fields, source_tables = _source_and_graph_payload()
-    mappings = _mapping_rows()
+def _sync_to_graph(
+    source_key: str = SOURCE_KEY,
+    sql: str | None = None,
+    file_name: str | None = None,
+) -> dict[str, Any]:
+    file_name, sql, source_hash, queries, input_fields, source_tables = _source_and_graph_payload(sql, file_name)
+    mappings = _mapping_rows() if source_key == SOURCE_KEY else []
     terms, property_links, relationship_links = _term_catalog()
     term_keys = {term["termKey"] for term in terms}
 
@@ -142,7 +161,8 @@ def _sync_to_graph() -> dict[str, Any]:
     for mapping in mappings:
         target_key = _mapping_target_key(mapping)
         if mapping["source_ref"] not in source_refs:
-            unresolved.append({"sourceRef": mapping["source_ref"], "reason": "Source is not present in sql.sql"})
+            reason = "Source is not present in sql.sql" if source_key == SOURCE_KEY else f"Source is not present in {file_name}"
+            unresolved.append({"sourceRef": mapping["source_ref"], "reason": reason})
         elif target_key not in term_keys:
             unresolved.append({"sourceRef": mapping["source_ref"], "reason": f"Unknown graph target {target_key}"})
         else:
@@ -221,14 +241,14 @@ def _sync_to_graph() -> dict[str, Any]:
     statements: list[tuple[str, dict[str, Any]]] = [
         (
             "MATCH (n:LegacySqlElement {sourceKey:$sourceKey}) SET n.active=false",
-            {"sourceKey": SOURCE_KEY},
+            {"sourceKey": source_key},
         ),
         (
             "MERGE (source:LegacySqlSource {sourceKey:$sourceKey}) "
             "SET source.fileName=$fileName, source.sha256=$sourceHash, source.sqlText=$sqlText, "
             "source.syncedAt=$syncedAt, source.active=true",
             {
-                "sourceKey": SOURCE_KEY, "fileName": file_name, "sourceHash": source_hash,
+                "sourceKey": source_key, "fileName": file_name, "sourceHash": source_hash,
                 "sqlText": sql,
                 "syncedAt": datetime.now(timezone.utc).isoformat(),
             },
@@ -236,7 +256,7 @@ def _sync_to_graph() -> dict[str, Any]:
         (
             "UNWIND $rows AS row MERGE (n:LegacySqlElement {sourceKey:$sourceKey, sourceRef:row.sourceRef}) "
             "SET n += row",
-            {"sourceKey": SOURCE_KEY, "rows": rows},
+            {"sourceKey": source_key, "rows": rows},
         ),
         (
             "UNWIND $terms AS row MERGE (term:OntologyTerm {termKey:row.termKey}) SET term += row",
@@ -249,7 +269,7 @@ def _sync_to_graph() -> dict[str, Any]:
     ):
         statements.append((
             f"MATCH ()-[r:{relationship_type} {{sourceKey:$sourceKey}}]->() DELETE r",
-            {"sourceKey": SOURCE_KEY},
+            {"sourceKey": source_key},
         ))
 
     edge_queries = {
@@ -270,7 +290,7 @@ def _sync_to_graph() -> dict[str, Any]:
             )
         else:
             statement = f"UNWIND $edges AS edge {edge_queries[edge_type]}"
-        statements.append((statement, {"sourceKey": SOURCE_KEY, "edges": edge_rows}))
+        statements.append((statement, {"sourceKey": source_key, "edges": edge_rows}))
 
     reviewed_mappings = []
     proposed_mappings = []
@@ -290,7 +310,7 @@ def _sync_to_graph() -> dict[str, Any]:
             "MATCH (term:OntologyTerm {termKey:mapping.termKey}) "
             f"MERGE (source)-[r:{relationship_type} {{sourceKey:$sourceKey}}]->(term) "
             "SET r += mapping",
-            {"sourceKey": SOURCE_KEY, "mappings": mapping_rows},
+            {"sourceKey": source_key, "mappings": mapping_rows},
         ))
 
     statements.append((
@@ -362,12 +382,59 @@ def sync_sql_lineage_to_graph():
         raise HTTPException(status_code=503, detail=f"Could not synchronize SQL lineage to Neo4j: {error}") from error
 
 
-@sqlLineageRouter.get("")
-def get_sql_lineage():
+@sqlLineageRouter.get("/saved-queries")
+def list_saved_sql_queries():
+    with pg_engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT id, name, sql_text, created_at FROM saved_sql_queries ORDER BY created_at DESC, id DESC"
+        )).mappings().all()
+    return [
+        {"id": row["id"], "name": row["name"], "sql": str(row["sql_text"]), "created_at": row["created_at"]}
+        for row in rows
+    ]
+
+
+@sqlLineageRouter.post("/saved-queries")
+def save_sql_query(request: SavedSqlQueryRequest):
+    if not request.name.strip() or not request.sql.strip():
+        raise HTTPException(status_code=422, detail="Query name and SQL are required")
+    with pg_engine.begin() as connection:
+        row = connection.execute(
+            text("INSERT INTO saved_sql_queries (name, sql_text) VALUES (:name, :sql) "
+                 "RETURNING id, name, sql_text, created_at"),
+            {"name": request.name.strip(), "sql": request.sql},
+        ).mappings().one()
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "sql": str(row["sql_text"]),
+        "created_at": row["created_at"],
+    }
+
+
+@sqlLineageRouter.post("/saved-queries/{query_id}/lineage")
+def build_saved_sql_lineage(query_id: int):
+    with pg_engine.connect() as connection:
+        saved = connection.execute(
+            text("SELECT id, name, sql_text FROM saved_sql_queries WHERE id = :query_id"),
+            {"query_id": query_id},
+        ).mappings().first()
+    if saved is None:
+        raise HTTPException(status_code=404, detail="Saved SQL query not found")
+
+    source_key = f"saved-sql/{query_id}"
+    try:
+        _sync_to_graph(source_key, str(saved["sql_text"]), f"{saved['name']}.sql")
+        return _get_sql_lineage(source_key)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not build lineage for saved SQL: {error}") from error
+
+
+def _get_sql_lineage(source_key: str) -> dict[str, Any]:
     source_rows = neo4jconn.run(
         "MATCH (source:LegacySqlSource {sourceKey:$sourceKey,active:true}) "
         "RETURN properties(source) AS source",
-        {"sourceKey": SOURCE_KEY},
+        {"sourceKey": source_key},
     )
     if not source_rows:
         return {"synced": False, "sourceFile": "fibo/sql/sql.sql", "queries": []}
@@ -379,7 +446,7 @@ def get_sql_lineage():
         "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
         "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
         "ORDER BY query.queryNumber",
-        {"sourceKey": SOURCE_KEY},
+        {"sourceKey": source_key},
     )
     queries: list[dict[str, Any]] = []
     for query_row in query_rows:
@@ -395,7 +462,7 @@ def get_sql_lineage():
             "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
             "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
             "ORDER BY output.position",
-            {"sourceKey": SOURCE_KEY, "queryId": query["queryId"]},
+            {"sourceKey": source_key, "queryId": query["queryId"]},
         )
         query["outputs"] = []
         clause_rows = neo4jconn.run(
@@ -408,7 +475,7 @@ def get_sql_lineage():
             "collect(DISTINCT CASE WHEN term IS NULL THEN null ELSE "
             "{term:properties(term),status:mapping.reviewStatus,relationshipType:type(mapping)} END) AS mappings "
             "ORDER BY clause.clauseKind",
-            {"sourceKey": SOURCE_KEY, "queryId": query["queryId"]},
+            {"sourceKey": source_key, "queryId": query["queryId"]},
         )
         query["clauses"] = []
         for clause_row in clause_rows:
@@ -436,3 +503,8 @@ def get_sql_lineage():
         },
         "queries": queries,
     }
+
+
+@sqlLineageRouter.get("")
+def get_sql_lineage():
+    return _get_sql_lineage(SOURCE_KEY)

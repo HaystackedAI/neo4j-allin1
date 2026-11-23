@@ -60,3 +60,10 @@ A practical first step is to choose one loan graph entity or property—such as 
 rbc.md describes the platform’s main outcome as business-readable lineage from legacy SQL, with CDEs linked to ontology terms.
 
 The app currently has borrower exploration and legacy-to-graph mapping, but no SQL lineage feature. The next step should be a separate SQL Lineage workflow that reads the legacy SQL and shows table/column dependencies, then lets users connect those lineage elements to saved mappings and CDEs. The existing legacy_loan_demo.sql is a suitable synthetic input.
+
+
+You’re right. The legacy DDL doesn’t need to match the names used in the transformation SQL. The lineage now comes from fibo/sql/sql.sql; it parses six queries, 31 output columns, and their projection, join, filter, and grouping dependencies.
+
+The implementation stores the SQL source, lineage nodes and edges, graph terms, and mapping/CDE links in Neo4j. PostgreSQL remains the mapping registry. Saving a mapping triggers a graph sync; otherwise, use Build graph lineage on the SQL Lineage page for the initial sync. I haven’t written to Aura from here.
+
+The parser/API and frontend build successfully. This parser handles the SQL patterns in sql.sql; it isn’t yet a general-purpose parser for arbitrary SQL.

@@ -3,6 +3,7 @@ import BorrowerProfile, { type BorrowerProfileData } from './BorrowerProfile'
 import OntologyMapping from './OntologyMapping'
 import LegacyFiboMapping from './LegacyFiboMapping'
 import SqlLineage from './SqlLineage'
+import SqlLineageOwl from './SqlLineageOwl'
 import './App.css'
 
 type SavedQuery = {
@@ -34,7 +35,7 @@ function App() {
     const [borrowerProfile, setBorrowerProfile] = useState<BorrowerProfileData | null>(null)
     const [error, setError] = useState('')
     const [running, setRunning] = useState(false)
-    const [activePage, setActivePage] = useState<'explore' | 'mapping' | 'legacy-fibo' | 'sql-lineage'>('explore')
+    const [activePage, setActivePage] = useState<'explore' | 'mapping' | 'legacy-fibo' | 'sql-lineage' | 'sql-lineage-owl'>('explore')
 
     async function loadSavedQueries() {
         const response = await fetch(`${API_BASE}/neo4j/saved-queries`)
@@ -168,6 +169,11 @@ function App() {
                         href="#sql-lineage"
                         onClick={() => setActivePage('sql-lineage')}
                     >SQL Lineage</a>
+                    <a
+                        className={activePage === 'sql-lineage-owl' ? 'nav-link active' : 'nav-link'}
+                        href="#sql-lineage-owl"
+                        onClick={() => setActivePage('sql-lineage-owl')}
+                    >SQL Lineage OWL</a>
                     <a className="nav-link" href="#govern">Govern</a>
                     <a className="nav-link" href="#chat">Chat</a>
                     <a className="nav-link" href="#admin">Admin</a>
@@ -180,6 +186,8 @@ function App() {
                             ? <LegacyFiboMapping />
                             : activePage === 'sql-lineage'
                                 ? <SqlLineage />
+                                : activePage === 'sql-lineage-owl'
+                                    ? <SqlLineageOwl />
                             : <>
                     <div className="content-heading">
                         <h1>Explore</h1>

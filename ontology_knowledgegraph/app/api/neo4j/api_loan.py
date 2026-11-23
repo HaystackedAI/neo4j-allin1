@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
@@ -63,6 +65,87 @@ def borrower_360(borrower_id: str):
         } AS borrower
     """
     return neo4jconn.run(cypher, {"borrower_id": borrower_id})
+
+
+@loanRou.get("/ontology-mappings")
+def ontology_mappings():
+    model_path = Path(__file__).resolve().parents[3] / "fibo" / "loan" / "neo4j_importer_model.json"
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    data_model = model["dataModel"]
+    schema = data_model["graphSchemaRepresentation"]["graphSchema"]
+    mappings = data_model["graphMappingRepresentation"]
+
+    labels_by_id = {item["$id"]: item for item in schema["nodeLabels"]}
+    properties_by_id = {
+        prop["$id"]: prop
+        for group in (schema["nodeLabels"] + schema["relationshipTypes"])
+        for prop in group.get("properties", [])
+    }
+    node_types_by_id = {item["$id"]: item for item in schema["nodeObjectTypes"]}
+    relationship_types_by_id = {item["$id"]: item for item in schema["relationshipTypes"]}
+    relationship_objects_by_id = {
+        item["$id"]: item for item in schema["relationshipObjectTypes"]
+    }
+
+    entities = []
+    for item in mappings["nodeMappings"]:
+        node_type = node_types_by_id[item["node"]["$ref"]]
+        label_refs = node_type.get("labels", [])
+        label_names = [labels_by_id[ref["$ref"]]["token"] for ref in label_refs]
+        label = label_names[0] if label_names else "Unknown"
+        label_definition = next(
+            (labels_by_id[ref["$ref"]] for ref in label_refs), {}
+        )
+        entities.append({
+            "name": label,
+            "labels": label_names,
+            "description": node_type.get("description", ""),
+            "source": item["tableName"],
+            "fiboTarget": None,
+            "properties": [
+                {
+                    "sourceField": prop_mapping["fieldName"],
+                    "graphProperty": properties_by_id[prop_mapping["property"]["$ref"]]["token"],
+                    "description": properties_by_id[prop_mapping["property"]["$ref"]].get("description", ""),
+                }
+                for prop_mapping in item.get("propertyMappings", [])
+            ],
+            "graphProperties": label_definition.get("properties", []),
+        })
+
+    relationships = []
+    node_label_names_by_type = {
+        node_id: [labels_by_id[ref["$ref"]]["token"] for ref in node_type.get("labels", [])]
+        for node_id, node_type in node_types_by_id.items()
+    }
+    for item in mappings["relationshipMappings"]:
+        relationship_object = relationship_objects_by_id[item["relationship"]["$ref"]]
+        relationship_type = relationship_types_by_id[relationship_object["type"]["$ref"]]
+        from_ref = relationship_object["from"]["$ref"]
+        to_ref = relationship_object["to"]["$ref"]
+        relationships.append({
+            "name": relationship_type["token"],
+            "from": node_label_names_by_type.get(from_ref, []),
+            "to": node_label_names_by_type.get(to_ref, []),
+            "description": relationship_object.get("description", ""),
+            "source": item["tableName"],
+            "fiboTarget": None,
+            "properties": [
+                {
+                    "sourceField": prop_mapping["fieldName"],
+                    "graphProperty": properties_by_id[prop_mapping["property"]["$ref"]]["token"],
+                    "description": properties_by_id[prop_mapping["property"]["$ref"]].get("description", ""),
+                }
+                for prop_mapping in item.get("propertyMappings", [])
+            ],
+        })
+
+    return {
+        "fiboTargetsRecorded": False,
+        "note": "The model contains FIBO-oriented descriptions and CSV-to-graph mappings, but no explicit FIBO class/property URIs or confidence scores.",
+        "entities": entities,
+        "relationships": relationships,
+    }
 
 
 def _json_safe(value: Any) -> Any:
